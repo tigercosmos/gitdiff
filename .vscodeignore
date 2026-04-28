@@ -12,3 +12,6 @@ plan.md
 **/*.map
 **/*.ts
 !out/src/**/*.js
+.env
+.vsix
+demo

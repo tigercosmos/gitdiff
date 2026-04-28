@@ -2,14 +2,19 @@
   "name": "gitdiff",
   "displayName": "GitDiff",
   "description": "Diff your working-tree file against any branch or commit, with the working-tree side editable.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "tigercosmos",
+  "icon": "icons/activity.png",
   "engines": {
     "vscode": "^1.85.0"
   },
   "categories": ["SCM Providers", "Other"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tigercosmos/gitdiff.git"
+  },
   "main": "./out/src/extension.js",
-  "activationEvents": ["*"],
+  "activationEvents": ["onStartupFinished"],
   "capabilities": {
     "virtualWorkspaces": false,
     "untrustedWorkspaces": {
@@ -179,7 +184,7 @@
     "watch": "tsc -watch -p ./",
     "test": "node ./out/test/integration/runTest.js",
     "test:unit": "mocha --require ts-node/register 'test/unit/**/*.test.ts'",
-    "package": "vsce package --allow-missing-repository --allow-star-activation",
+    "package": "vsce package",
     "lint": "tsc --noEmit"
   },
   "devDependencies": {
