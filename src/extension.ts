@@ -19,6 +19,7 @@ export function activate(context: vscode.ExtensionContext): void {
     showCollapseAll: false,
   });
   updateChangedFilesViewTitle(changedFilesView, changedFiles);
+  updateHasTargetContext(changedFiles);
 
   context.subscriptions.push(
     changedFilesView,
@@ -78,6 +79,7 @@ export function activate(context: vscode.ExtensionContext): void {
       if (!picked) return;
       await changedFiles.setTarget(picked, repoRoot);
       updateChangedFilesViewTitle(changedFilesView, changedFiles);
+      updateHasTargetContext(changedFiles);
     }),
     vscode.commands.registerCommand(
       'gitdiff.changedFiles.openFile',
@@ -87,6 +89,16 @@ export function activate(context: vscode.ExtensionContext): void {
         await opener.open(vscode.Uri.file(file.absPath), target);
       },
     ),
+    vscode.commands.registerCommand('gitdiff.changedFiles.clearTarget', async () => {
+      const tabs: vscode.Tab[] = [];
+      for (const { tab } of openGitdiffTabs()) tabs.push(tab);
+      await changedFiles.clearTarget();
+      updateChangedFilesViewTitle(changedFilesView, changedFiles);
+      updateHasTargetContext(changedFiles);
+      if (tabs.length > 0) {
+        await vscode.window.tabGroups.close(tabs);
+      }
+    }),
   );
 
   // Restore-sweep: any gitdiff: tabs that VSCode reopened before we activated
@@ -151,6 +163,7 @@ async function runCompareForUri(
     // tree is populated without a separate "Set Comparison Target" step.
     await changedFiles.setTarget(picked, repoRoot);
     updateChangedFilesViewTitle(changedFilesView, changedFiles);
+    updateHasTargetContext(changedFiles);
   }
 }
 
@@ -167,6 +180,14 @@ function updateChangedFilesViewTitle(
 ): void {
   const target = provider.getCurrentTarget();
   view.description = target ? `vs ${target.display}` : undefined;
+}
+
+function updateHasTargetContext(provider: ChangedFilesProvider): void {
+  void vscode.commands.executeCommand(
+    'setContext',
+    'gitdiff.hasTarget',
+    provider.getCurrentTarget() !== undefined,
+  );
 }
 
 function* openGitdiffTabs(): Generator<{ uri: vscode.Uri; tab: vscode.Tab }> {

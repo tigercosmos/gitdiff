@@ -16,7 +16,7 @@ Module._resolveFilename = function (request: string, ...rest: unknown[]) {
 };
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { GitService } = require('../../src/gitService');
+const { GitService, parseNameStatusZ } = require('../../src/gitService');
 
 function git(cwd: string, args: string[]): void {
   execFileSync('git', args, { cwd, stdio: 'pipe' });
@@ -65,7 +65,7 @@ describe('GitService', function () {
 
   it('resolves repo root', async () => {
     const r = await svc.repoRoot(path.join(root, 'a.txt'));
-    assert.strictEqual(fs.realpathSync(r), fs.realpathSync(root));
+    assert.strictEqual(fs.realpathSync.native(r), fs.realpathSync.native(root));
   });
 
   it('lists local branches', async () => {
@@ -161,5 +161,164 @@ describe('GitService', function () {
     const r = await svc.showFileAtSha(root, await sha('feature/x'), 'c.txt');
     assert.strictEqual(r.exists, true);
     assert.strictEqual(r.bytes.toString('utf8'), 'feature\n');
+  });
+
+  it('verifyRef accepts a tag and returns its commit SHA', async () => {
+    git(root, ['tag', 'v1']);
+    const tagSha = await sha('v1');
+    const headSha = await sha('main');
+    assert.strictEqual(tagSha, headSha);
+  });
+
+  it('verifyRef accepts a short SHA', async () => {
+    const commits = await svc.listCommits(root, 1);
+    const shortSha = commits[0].shortSha;
+    const full = await sha(shortSha);
+    assert.strictEqual(full, commits[0].fullSha);
+  });
+
+  it('verifyRef rejects empty and whitespace-only refs', async () => {
+    await assert.rejects(sha(''));
+    await assert.rejects(sha('   '));
+  });
+
+  it('listCommits respects the limit', async () => {
+    const limited = await svc.listCommits(root, 1);
+    assert.strictEqual(limited.length, 1);
+  });
+
+  it('listCommits rejects in an empty repo (no HEAD commits)', async () => {
+    const empty = makeRepo();
+    await assert.rejects(svc.listCommits(empty, 10));
+  });
+
+  it('relPath returns POSIX-style repo-relative path', async () => {
+    // relPath canonicalizes the containing dir via realpathSync, so compare
+    // against a canonicalized repo root (macOS /var ↔ /private/var).
+    const canonRoot = fs.realpathSync(root);
+    const rel = svc.relPath(canonRoot, path.join(root, 'a.txt'));
+    assert.strictEqual(rel, 'a.txt');
+  });
+
+  it('relPath joins nested directories with forward slashes', async () => {
+    const canonRoot = fs.realpathSync(root);
+    const sub = path.join(root, 'sub', 'dir');
+    fs.mkdirSync(sub, { recursive: true });
+    const rel = svc.relPath(canonRoot, path.join(sub, 'nested.ts'));
+    assert.strictEqual(rel, 'sub/dir/nested.ts');
+  });
+
+  it('listChangedPaths reports working-tree differences vs a ref', async () => {
+    const wt = makeRepo();
+    fs.writeFileSync(path.join(wt, 'kept.txt'), 'kept\n');
+    fs.writeFileSync(path.join(wt, 'modify.txt'), 'before\n');
+    fs.writeFileSync(path.join(wt, 'remove.txt'), 'gone soon\n');
+    commit(wt, 'baseline');
+    fs.writeFileSync(path.join(wt, 'modify.txt'), 'after\n');
+    fs.writeFileSync(path.join(wt, 'added.txt'), 'new\n');
+    git(wt, ['add', 'added.txt']);
+    fs.unlinkSync(path.join(wt, 'remove.txt'));
+    git(wt, ['rm', '--quiet', 'remove.txt']);
+
+    const changes = await svc.listChangedPaths(wt, 'HEAD');
+    const byPath = new Map<string, string>(
+      changes.map((c: { relPath: string; status: string }) => [c.relPath, c.status]),
+    );
+    assert.strictEqual(byPath.get('modify.txt'), 'M');
+    assert.strictEqual(byPath.get('added.txt'), 'A');
+    assert.strictEqual(byPath.get('remove.txt'), 'D');
+    assert.ok(!byPath.has('kept.txt'));
+  });
+
+  it('listUntrackedPaths returns only untracked files', async () => {
+    const wt = makeRepo();
+    fs.writeFileSync(path.join(wt, 'tracked.txt'), 'x\n');
+    commit(wt, 'baseline');
+    fs.writeFileSync(path.join(wt, 'untracked.txt'), 'y\n');
+    fs.writeFileSync(path.join(wt, '.gitignore'), 'ignored.txt\n');
+    fs.writeFileSync(path.join(wt, 'ignored.txt'), 'z\n');
+
+    const untracked = await svc.listUntrackedPaths(wt);
+    assert.ok(untracked.includes('untracked.txt'));
+    assert.ok(!untracked.includes('tracked.txt'));
+    assert.ok(!untracked.includes('ignored.txt'));
+  });
+
+  it('pathExistsAtRef rejects unknown SHAs', async () => {
+    await assert.rejects(
+      svc.pathExistsAtRef(root, '0000000000000000000000000000000000000000', 'a.txt'),
+    );
+  });
+});
+
+describe('parseNameStatusZ', () => {
+  it('returns [] for empty input', () => {
+    assert.deepStrictEqual(parseNameStatusZ(''), []);
+  });
+
+  it('parses a single modified entry', () => {
+    assert.deepStrictEqual(parseNameStatusZ('M\0a.txt\0'), [
+      { relPath: 'a.txt', status: 'M' },
+    ]);
+  });
+
+  it('parses adds and deletes', () => {
+    const input = 'A\0added.txt\0D\0gone.txt\0';
+    assert.deepStrictEqual(parseNameStatusZ(input), [
+      { relPath: 'added.txt', status: 'A' },
+      { relPath: 'gone.txt', status: 'D' },
+    ]);
+  });
+
+  it('parses a rename, keeping only the new path with status R', () => {
+    // R<score>NUL<old>NUL<new>NUL
+    const input = 'R100\0old/path.ts\0new/path.ts\0';
+    assert.deepStrictEqual(parseNameStatusZ(input), [
+      { relPath: 'new/path.ts', status: 'R' },
+    ]);
+  });
+
+  it('parses a copy, keeping only the new path with status C', () => {
+    const input = 'C075\0src.ts\0copy.ts\0';
+    assert.deepStrictEqual(parseNameStatusZ(input), [
+      { relPath: 'copy.ts', status: 'C' },
+    ]);
+  });
+
+  it('parses type-change (T) and unmerged (U) statuses', () => {
+    const input = 'T\0link.txt\0U\0conflict.txt\0';
+    assert.deepStrictEqual(parseNameStatusZ(input), [
+      { relPath: 'link.txt', status: 'T' },
+      { relPath: 'conflict.txt', status: 'U' },
+    ]);
+  });
+
+  it('mixes regular entries with a rename', () => {
+    const input = 'M\0a.txt\0R090\0from.ts\0to.ts\0D\0d.txt\0';
+    assert.deepStrictEqual(parseNameStatusZ(input), [
+      { relPath: 'a.txt', status: 'M' },
+      { relPath: 'to.ts', status: 'R' },
+      { relPath: 'd.txt', status: 'D' },
+    ]);
+  });
+
+  it('handles input without a trailing NUL', () => {
+    assert.deepStrictEqual(parseNameStatusZ('M\0a.txt'), [
+      { relPath: 'a.txt', status: 'M' },
+    ]);
+  });
+
+  it('normalizes unknown status letters to M', () => {
+    // Defensive fallback for any future status code git introduces.
+    assert.deepStrictEqual(parseNameStatusZ('X\0weird.txt\0'), [
+      { relPath: 'weird.txt', status: 'M' },
+    ]);
+  });
+
+  it('preserves filenames containing spaces and unicode', () => {
+    const input = 'M\0src/файл with space.ts\0';
+    assert.deepStrictEqual(parseNameStatusZ(input), [
+      { relPath: 'src/файл with space.ts', status: 'M' },
+    ]);
   });
 });

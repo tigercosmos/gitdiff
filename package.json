@@ -50,6 +50,11 @@
       {
         "command": "gitdiff.changedFiles.openFile",
         "title": "GitDiff: Open Diff for File"
+      },
+      {
+        "command": "gitdiff.changedFiles.clearTarget",
+        "title": "GitDiff: Clear Comparison Target",
+        "icon": "$(clear-all)"
       }
     ],
     "viewsContainers": {
@@ -139,8 +144,13 @@
         },
         {
           "command": "gitdiff.changedFiles.refresh",
-          "when": "view == gitdiff.changedFiles",
+          "when": "view == gitdiff.changedFiles && gitdiff.hasTarget",
           "group": "navigation@2"
+        },
+        {
+          "command": "gitdiff.changedFiles.clearTarget",
+          "when": "view == gitdiff.changedFiles && gitdiff.hasTarget",
+          "group": "navigation@3"
         }
       ]
     },
