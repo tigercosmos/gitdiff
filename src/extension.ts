@@ -5,31 +5,48 @@ import { ActiveDiffTracker } from './activeDiffTracker';
 import { DiffOpener } from './diffOpener';
 import { RefPicker } from './refPicker';
 import { decodeGitdiffUri } from './util/uri';
-import { ChangedFilesProvider, ChangedFile } from './changedFilesProvider';
+import { ChangedFilesProvider, ChangedFile, VIEW_ID } from './changedFilesProvider';
 
-export function activate(context: vscode.ExtensionContext): void {
+export interface GitDiffExports {
+  /** Internal — exposed only so integration tests can inspect filter state. */
+  readonly changedFiles: ChangedFilesProvider;
+}
+
+export function activate(context: vscode.ExtensionContext): GitDiffExports {
   const git = new GitService();
   const provider = new GitShowProvider(git);
   const tracker = new ActiveDiffTracker();
   const opener = new DiffOpener(git);
   const picker = new RefPicker(git);
-  const changedFiles = new ChangedFilesProvider(git, context.workspaceState);
-  const changedFilesView = vscode.window.createTreeView('gitdiff.changedFiles', {
-    treeDataProvider: changedFiles,
-    showCollapseAll: false,
-  });
-  updateChangedFilesViewTitle(changedFilesView, changedFiles);
-  updateHasTargetContext(changedFiles);
+  const changedFiles = new ChangedFilesProvider(
+    git,
+    context.workspaceState,
+    context.extensionUri,
+  );
+  const syncHasTargetContext = (): void => {
+    void vscode.commands.executeCommand(
+      'setContext',
+      'gitdiff.hasTarget',
+      changedFiles.getCurrentTarget() !== undefined,
+    );
+  };
+  syncHasTargetContext();
+  context.subscriptions.push(
+    changedFiles,
+    changedFiles.onDidChangeTarget(syncHasTargetContext),
+    vscode.window.registerWebviewViewProvider(VIEW_ID, changedFiles, {
+      webviewOptions: { retainContextWhenHidden: true },
+    }),
+  );
 
   context.subscriptions.push(
-    changedFilesView,
     vscode.workspace.registerTextDocumentContentProvider(GITDIFF_SCHEME, provider),
     tracker,
     vscode.commands.registerCommand('gitdiff.compareWithBranch', (uri?: vscode.Uri) =>
-      runCompare('branch', uri, picker, opener, changedFiles, changedFilesView),
+      runCompare('branch', uri, picker, opener, changedFiles),
     ),
     vscode.commands.registerCommand('gitdiff.compareWithCommit', (uri?: vscode.Uri) =>
-      runCompare('commit', uri, picker, opener, changedFiles, changedFilesView),
+      runCompare('commit', uri, picker, opener, changedFiles),
     ),
     vscode.commands.registerCommand('gitdiff.refresh', async () => {
       const active = tracker.getActiveGitdiffPair();
@@ -45,7 +62,7 @@ export function activate(context: vscode.ExtensionContext): void {
         void vscode.window.showInformationMessage('No active GitDiff diff.');
         return;
       }
-      await runCompareForUri(active.right, 'pick', picker, opener, changedFiles, changedFilesView);
+      await runCompareForUri(active.right, 'pick', picker, opener, changedFiles);
     }),
     // Refresh all open gitdiff: tabs when our config changes, since that may
     // alter what `git` resolves to (e.g., gitdiff.gitPath).
@@ -58,7 +75,7 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
 
     vscode.commands.registerCommand('gitdiff.changedFiles.refresh', () => {
-      changedFiles.refresh();
+      void changedFiles.refresh();
     }),
     vscode.commands.registerCommand('gitdiff.changedFiles.setTarget', async () => {
       const fileUri = pickAnyWorkspaceFileUri();
@@ -78,8 +95,6 @@ export function activate(context: vscode.ExtensionContext): void {
       const picked = await picker.pickAny(fileUri);
       if (!picked) return;
       await changedFiles.setTarget(picked, repoRoot);
-      updateChangedFilesViewTitle(changedFilesView, changedFiles);
-      updateHasTargetContext(changedFiles);
     }),
     vscode.commands.registerCommand(
       'gitdiff.changedFiles.openFile',
@@ -93,8 +108,6 @@ export function activate(context: vscode.ExtensionContext): void {
       const tabs: vscode.Tab[] = [];
       for (const { tab } of openGitdiffTabs()) tabs.push(tab);
       await changedFiles.clearTarget();
-      updateChangedFilesViewTitle(changedFilesView, changedFiles);
-      updateHasTargetContext(changedFiles);
       if (tabs.length > 0) {
         await vscode.window.tabGroups.close(tabs);
       }
@@ -110,6 +123,8 @@ export function activate(context: vscode.ExtensionContext): void {
       await refreshOrCloseUnsupported(git, provider, uri, tab);
     }
   })();
+
+  return { changedFiles };
 }
 
 export async function deactivate(): Promise<void> {
@@ -128,14 +143,13 @@ async function runCompare(
   picker: RefPicker,
   opener: DiffOpener,
   changedFiles: ChangedFilesProvider,
-  changedFilesView: vscode.TreeView<unknown>,
 ): Promise<void> {
   const target = uri ?? vscode.window.activeTextEditor?.document.uri;
   if (!target) {
     void vscode.window.showInformationMessage('Open a file from your workspace first.');
     return;
   }
-  await runCompareForUri(target, mode, picker, opener, changedFiles, changedFilesView);
+  await runCompareForUri(target, mode, picker, opener, changedFiles);
 }
 
 async function runCompareForUri(
@@ -144,26 +158,30 @@ async function runCompareForUri(
   picker: RefPicker,
   opener: DiffOpener,
   changedFiles: ChangedFilesProvider,
-  changedFilesView: vscode.TreeView<unknown>,
 ): Promise<void> {
   if (fileUri.scheme !== 'file') {
     void vscode.window.showInformationMessage('Open a file from your workspace first.');
     return;
   }
-  const picked =
-    mode === 'commit'
-      ? await picker.pickCommit(fileUri)
-      : mode === 'branch'
-        ? await picker.pickBranch(fileUri)
-        : await picker.pickAny(fileUri);
+  const picked = await pickRef(mode, picker, fileUri);
   if (!picked) return;
   const repoRoot = await opener.open(fileUri, picked);
   if (repoRoot) {
-    // Surface the just-picked target in the sidebar so the changed-files
-    // tree is populated without a separate "Set Comparison Target" step.
-    await changedFiles.setTarget(picked, repoRoot);
-    updateChangedFilesViewTitle(changedFilesView, changedFiles);
-    updateHasTargetContext(changedFiles);
+    // Populate the sidebar without blocking the compare command — the diff
+    // tab is already open; the changed-files scan can finish in the
+    // background and update the sidebar when ready.
+    void changedFiles.setTarget(picked, repoRoot);
+  }
+}
+
+function pickRef(mode: Mode, picker: RefPicker, fileUri: vscode.Uri) {
+  switch (mode) {
+    case 'commit':
+      return picker.pickCommit(fileUri);
+    case 'branch':
+      return picker.pickBranch(fileUri);
+    case 'pick':
+      return picker.pickAny(fileUri);
   }
 }
 
@@ -172,22 +190,6 @@ function pickAnyWorkspaceFileUri(): vscode.Uri | undefined {
   if (active && active.scheme === 'file') return active;
   const folder = vscode.workspace.workspaceFolders?.[0];
   return folder?.uri.scheme === 'file' ? folder.uri : undefined;
-}
-
-function updateChangedFilesViewTitle(
-  view: vscode.TreeView<unknown>,
-  provider: ChangedFilesProvider,
-): void {
-  const target = provider.getCurrentTarget();
-  view.description = target ? `vs ${target.display}` : undefined;
-}
-
-function updateHasTargetContext(provider: ChangedFilesProvider): void {
-  void vscode.commands.executeCommand(
-    'setContext',
-    'gitdiff.hasTarget',
-    provider.getCurrentTarget() !== undefined,
-  );
 }
 
 function* openGitdiffTabs(): Generator<{ uri: vscode.Uri; tab: vscode.Tab }> {

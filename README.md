@@ -38,6 +38,7 @@ GitDiff does exactly that — and unlike a read-only `git diff`, **the working-t
 - **Editable right pane** — it's the real file on disk. Edit and save like any normal editor.
 - **Read-only left pane** — backed by `git show <ref>:<path>`, so you can't accidentally clobber history.
 - **Changed-Files sidebar** — pick a target once, see every file in your tree that differs from it, click to open the diff.
+- **Search + path filters in the sidebar** — narrow the changed-files list with a content search (match case / whole word / regex toggles, mirroring VS Code Search) plus comma-separated `files to include` / `files to exclude` glob inputs.
 - **Live branch tracking** — when comparing against a branch, "Refresh" re-resolves it to the current tip.
 - **Repo-aware** — works correctly with multi-root workspaces, nested repos, and reserved characters in branch names.
 - **Safe by default** — refuses to diff binary or non-UTF-8 blobs, declares no virtual-workspace support, and the `git` binary path is machine-scoped (workspace settings can't override it).
@@ -53,7 +54,7 @@ ext install tigercosmos.gitdiff
 **From a `.vsix`**
 
 ```bash
-code --install-extension gitdiff-0.1.0.vsix
+code --install-extension gitdiff-0.2.0.vsix
 ```
 
 ## Usage
@@ -72,8 +73,9 @@ You can also right-click a file in the Explorer or on the editor tab to launch e
 
 1. Click the **GitDiff** icon in the Activity Bar.
 2. Hit **Set Comparison Target…** in the view's title.
-3. Click any file in the tree to open its diff against your chosen target.
-4. Use the **Clear Comparison Target** button (`$(clear-all)`) in the view's title to drop the target and close every open GitDiff diff in one click.
+3. Click any file in the list to open its diff against your chosen target.
+4. Narrow the list with the **Search** box (toggle match-case / whole-word / regex on the right) and the **files to include** / **files to exclude** glob inputs — same comma-separated syntax as VS Code's Search panel (`*.ts`, `src/`, `**/*.test.ts`, `*.{ts,tsx}`). Filter state is remembered per workspace.
+5. Use the **Clear Comparison Target** button (`$(clear-all)`) in the view's title to drop the target and close every open GitDiff diff in one click.
 
 ### Editor title actions
 
@@ -119,7 +121,7 @@ When a GitDiff diff is the active editor:
 │  RefPicker           — QuickPick UI for branches and commits │
 │  DiffOpener          — builds URIs and calls vscode.diff     │
 │  GitShowProvider     — TextDocumentContentProvider (left)    │
-│  ChangedFilesProvider — TreeView for the sidebar             │
+│  ChangedFilesProvider — WebviewView for the sidebar          │
 │  ActiveDiffTracker   — maintains the activeDiff context key  │
 └──────────────────────────────────────────────────────────────┘
 ```

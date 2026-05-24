@@ -248,6 +248,46 @@ export class GitService {
   }
 
   /**
+   * Absolute paths of every *live* worktree linked to this repo (including
+   * the main worktree). Parses `git worktree list --porcelain`. Records are
+   * blank-line separated; each starts with `worktree <path>` and may carry a
+   * `prunable ...` line if the worktree's directory has been removed. We
+   * skip prunable entries so a stale path doesn't masquerade as a real
+   * worktree and end up hiding newly-created files at the same location.
+   * Returns an empty list on older git versions that don't recognise the
+   * command.
+   */
+  async listWorktrees(repoRoot: string): Promise<string[]> {
+    const r = await execGit(
+      this.gitPath(),
+      ['worktree', 'list', '--porcelain'],
+      repoRoot,
+      { allowNonZero: true },
+    );
+    if (r.code !== 0) return [];
+    // Drive a small state machine over lines: a `worktree <path>` line
+    // starts a new record; subsequent attribute lines (`HEAD`, `branch`,
+    // `prunable`, `locked`, …) belong to it. Splitting on blank lines is
+    // brittle across git versions (and trailing-newline quirks); treating
+    // every `worktree` line as a record boundary is robust.
+    const out: string[] = [];
+    let current: { path: string; prunable: boolean } | undefined;
+    const flush = (): void => {
+      if (current && !current.prunable) out.push(current.path);
+    };
+    for (const line of r.stdout.toString('utf8').split('\n')) {
+      if (line.startsWith('worktree ')) {
+        flush();
+        current = { path: line.slice('worktree '.length).trim(), prunable: false };
+      } else if (current && (line === 'prunable' || line.startsWith('prunable '))) {
+        current.prunable = true;
+      }
+    }
+    flush();
+    return out;
+  }
+
+  /**
    * Read file bytes at a verified SHA. Caller distinguishes binary/text via
    * `kind`. Returns `exists: false` only when the path genuinely is not
    * present in the tree at this ref; any other failure throws.

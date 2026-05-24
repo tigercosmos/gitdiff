@@ -249,6 +249,55 @@ describe('GitService', function () {
       svc.pathExistsAtRef(root, '0000000000000000000000000000000000000000', 'a.txt'),
     );
   });
+
+  it('listWorktrees returns at least the main worktree path', async () => {
+    const wts: string[] = await svc.listWorktrees(root);
+    assert.ok(wts.length >= 1);
+    const canon = wts.map((w: string) => fs.realpathSync(w));
+    assert.ok(canon.some((p: string) => p === fs.realpathSync(root)));
+  });
+
+  it('listWorktrees returns both the main and linked nested worktrees', async () => {
+    const wt = makeRepo();
+    fs.writeFileSync(path.join(wt, 'seed.txt'), 'seed\n');
+    commit(wt, 'seed');
+    // Create a branch and add a linked worktree nested inside the main repo.
+    git(wt, ['branch', 'feature']);
+    git(wt, ['worktree', 'add', '-q', path.join(wt, 'wt-feature'), 'feature']);
+
+    const wts: string[] = await svc.listWorktrees(wt);
+    const canon = wts.map((w: string) => fs.realpathSync(w));
+    assert.ok(canon.some((p: string) => p === fs.realpathSync(wt)));
+    assert.ok(canon.some((p: string) => p === fs.realpathSync(path.join(wt, 'wt-feature'))));
+  });
+
+  it('listWorktrees skips prunable (stale) worktree records', async () => {
+    const wt = makeRepo();
+    fs.writeFileSync(path.join(wt, 'seed.txt'), 'seed\n');
+    commit(wt, 'seed');
+    git(wt, ['branch', 'feature']);
+    const linkedPath = path.join(wt, 'wt-stale');
+    git(wt, ['worktree', 'add', '-q', linkedPath, 'feature']);
+    // Physically remove the worktree directory; `git worktree list` now
+    // reports it as `prunable` until `git worktree prune` runs.
+    fs.rmSync(linkedPath, { recursive: true, force: true });
+
+    const wts: string[] = await svc.listWorktrees(wt);
+    const canon = wts.map((w: string) => {
+      try {
+        return fs.realpathSync(w);
+      } catch {
+        return w;
+      }
+    });
+    // Main repo is still listed; the stale linked path must NOT appear (else
+    // computeWorktreeExclusion would hide a new dir with the same name).
+    assert.ok(canon.some((p: string) => p === fs.realpathSync(wt)));
+    assert.ok(
+      !canon.some((p: string) => p.endsWith('wt-stale')),
+      `prunable worktree must be dropped, got ${JSON.stringify(canon)}`,
+    );
+  });
 });
 
 describe('parseNameStatusZ', () => {
