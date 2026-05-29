@@ -311,7 +311,9 @@ export class GitService {
     const flush = (): void => {
       if (current && !current.prunable) out.push(current.path);
     };
-    for (const line of r.stdout.toString('utf8').split('\n')) {
+    // Split on \r?\n so a Windows CRLF doesn't leave a trailing \r that breaks
+    // the exact-match attribute checks below (e.g. `prunable\r` !== `prunable`).
+    for (const line of r.stdout.toString('utf8').split(/\r?\n/)) {
       if (line.startsWith('worktree ')) {
         flush();
         current = { path: line.slice('worktree '.length).trim(), prunable: false };

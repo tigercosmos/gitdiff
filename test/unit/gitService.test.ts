@@ -285,11 +285,17 @@ describe('GitService', function () {
     );
   });
 
+  // NOTE: these comparisons use fs.realpathSync.native (not plain
+  // realpathSync). On Windows the legacy realpathSync preserves the input's
+  // drive-letter case, so a git-sourced path ("C:\…") and an os.tmpdir()-
+  // sourced path ("c:\…") fail to string-match even though they're the same
+  // directory. .native canonicalizes the drive case (and is what the
+  // "resolves repo root" test above already relies on).
   it('listWorktrees returns at least the main worktree path', async () => {
     const wts: string[] = await svc.listWorktrees(root);
     assert.ok(wts.length >= 1);
-    const canon = wts.map((w: string) => fs.realpathSync(w));
-    assert.ok(canon.some((p: string) => p === fs.realpathSync(root)));
+    const canon = wts.map((w: string) => fs.realpathSync.native(w));
+    assert.ok(canon.some((p: string) => p === fs.realpathSync.native(root)));
   });
 
   it('listWorktrees returns both the main and linked nested worktrees', async () => {
@@ -301,9 +307,9 @@ describe('GitService', function () {
     git(wt, ['worktree', 'add', '-q', path.join(wt, 'wt-feature'), 'feature']);
 
     const wts: string[] = await svc.listWorktrees(wt);
-    const canon = wts.map((w: string) => fs.realpathSync(w));
-    assert.ok(canon.some((p: string) => p === fs.realpathSync(wt)));
-    assert.ok(canon.some((p: string) => p === fs.realpathSync(path.join(wt, 'wt-feature'))));
+    const canon = wts.map((w: string) => fs.realpathSync.native(w));
+    assert.ok(canon.some((p: string) => p === fs.realpathSync.native(wt)));
+    assert.ok(canon.some((p: string) => p === fs.realpathSync.native(path.join(wt, 'wt-feature'))));
   });
 
   it('listWorktrees skips prunable (stale) worktree records', async () => {
@@ -320,14 +326,14 @@ describe('GitService', function () {
     const wts: string[] = await svc.listWorktrees(wt);
     const canon = wts.map((w: string) => {
       try {
-        return fs.realpathSync(w);
+        return fs.realpathSync.native(w);
       } catch {
         return w;
       }
     });
     // Main repo is still listed; the stale linked path must NOT appear (else
     // computeWorktreeExclusion would hide a new dir with the same name).
-    assert.ok(canon.some((p: string) => p === fs.realpathSync(wt)));
+    assert.ok(canon.some((p: string) => p === fs.realpathSync.native(wt)));
     assert.ok(
       !canon.some((p: string) => p.endsWith('wt-stale')),
       `prunable worktree must be dropped, got ${JSON.stringify(canon)}`,
