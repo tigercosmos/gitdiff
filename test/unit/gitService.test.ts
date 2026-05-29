@@ -195,13 +195,13 @@ describe('GitService', function () {
   it('relPath returns POSIX-style repo-relative path', async () => {
     // relPath canonicalizes the containing dir via realpathSync, so compare
     // against a canonicalized repo root (macOS /var ↔ /private/var).
-    const canonRoot = fs.realpathSync(root);
+    const canonRoot = fs.realpathSync.native(root);
     const rel = svc.relPath(canonRoot, path.join(root, 'a.txt'));
     assert.strictEqual(rel, 'a.txt');
   });
 
   it('relPath joins nested directories with forward slashes', async () => {
-    const canonRoot = fs.realpathSync(root);
+    const canonRoot = fs.realpathSync.native(root);
     const sub = path.join(root, 'sub', 'dir');
     fs.mkdirSync(sub, { recursive: true });
     const rel = svc.relPath(canonRoot, path.join(sub, 'nested.ts'));
@@ -212,12 +212,12 @@ describe('GitService', function () {
     // The changed-files sidebar passes the workspace folder (a directory) when
     // no editor is active; equal-to-root must yield '' (no path filter), not a
     // bogus basename-appended pathspec.
-    const canonRoot = fs.realpathSync(root);
+    const canonRoot = fs.realpathSync.native(root);
     assert.strictEqual(svc.relPath(canonRoot, root), '');
   });
 
   it('relPath returns the subdir path for a directory inside the repo', async () => {
-    const canonRoot = fs.realpathSync(root);
+    const canonRoot = fs.realpathSync.native(root);
     const sub = path.join(root, 'sub', 'dir');
     fs.mkdirSync(sub, { recursive: true });
     assert.strictEqual(svc.relPath(canonRoot, sub), 'sub/dir');
@@ -228,7 +228,7 @@ describe('GitService', function () {
     // relPath must canonicalize the *whole* directory (including the symlink
     // final component) to line up — otherwise it re-appends the unresolved
     // symlink basename and produces an outside-repo pathspec.
-    const canonRoot = fs.realpathSync(root);
+    const canonRoot = fs.realpathSync.native(root);
     const link = path.join(os.tmpdir(), `gitdiff-link-${path.basename(root)}`);
     try {
       fs.symlinkSync(root, link, 'dir');
