@@ -73,8 +73,30 @@ export class GitService {
    * --show-toplevel` resolves symlinks. On macOS, `/var/folders/...` ↔
    * `/private/var/folders/...` is the common offender.
    */
-  async repoRoot(absFilePath: string): Promise<string> {
-    const dir = path.dirname(absFilePath);
+  async repoRoot(absPath: string): Promise<string> {
+    // `absPath` is usually a file, but the changed-files sidebar can hand us
+    // the workspace folder itself (a directory) when no editor is active.
+    // `path.dirname()` on a directory climbs above it — and for a worktree
+    // nested in (or sibling to) the main repo that lands in the *wrong* repo,
+    // so `--show-toplevel` resolves to the main repo instead of the worktree.
+    // Use the path directly when it's a directory; only strip the basename
+    // for files (or paths that don't exist yet, e.g. a not-yet-saved file).
+    let dir = absPath;
+    try {
+      if (!fs.statSync(absPath).isDirectory()) {
+        dir = path.dirname(absPath);
+      }
+    } catch (err) {
+      // ENOENT: the path doesn't exist yet (e.g. an unsaved new file) — its
+      // parent directory is the right place to resolve from. For any other
+      // stat error (EACCES, …) the path *does* exist but we can't classify
+      // it; climbing to the parent could resolve the *wrong* repo (a nested
+      // worktree would resolve to its main repo), so leave `dir = absPath`
+      // and let `git -C` surface the underlying error instead.
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        dir = path.dirname(absPath);
+      }
+    }
     const result = await execGit(this.gitPath(), ['-C', dir, 'rev-parse', '--show-toplevel'], dir);
     return result.stdout.toString('utf8').trim();
   }
@@ -84,8 +106,22 @@ export class GitService {
    * macOS `/var` ↔ `/private/var` symlinks line up with `repoRoot`'s
    * realpath-resolved form), then re-appends the basename so a tracked
    * symlink file is compared as itself rather than as its target.
+   *
+   * Directory arguments (e.g. the workspace folder itself, passed when no
+   * editor is active) are canonicalized *whole* — including a symlinked final
+   * component — so a symlinked worktree folder lines up with `repoRoot` and
+   * yields `''` when they're the same directory, rather than re-appending the
+   * unresolved symlink basename and producing an outside-repo pathspec.
    */
   relPath(repoRoot: string, absFilePath: string): string {
+    try {
+      if (fs.statSync(absFilePath).isDirectory()) {
+        const canon = fs.realpathSync(absFilePath);
+        return path.relative(repoRoot, canon).split(path.sep).join('/');
+      }
+    } catch {
+      // Path doesn't exist yet (new file) — fall through to the file logic.
+    }
     const dir = path.dirname(absFilePath);
     const base = path.basename(absFilePath);
     let canonDir = dir;

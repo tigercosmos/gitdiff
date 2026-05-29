@@ -208,6 +208,41 @@ describe('GitService', function () {
     assert.strictEqual(rel, 'sub/dir/nested.ts');
   });
 
+  it('relPath returns empty for the repo root directory itself', async () => {
+    // The changed-files sidebar passes the workspace folder (a directory) when
+    // no editor is active; equal-to-root must yield '' (no path filter), not a
+    // bogus basename-appended pathspec.
+    const canonRoot = fs.realpathSync(root);
+    assert.strictEqual(svc.relPath(canonRoot, root), '');
+  });
+
+  it('relPath returns the subdir path for a directory inside the repo', async () => {
+    const canonRoot = fs.realpathSync(root);
+    const sub = path.join(root, 'sub', 'dir');
+    fs.mkdirSync(sub, { recursive: true });
+    assert.strictEqual(svc.relPath(canonRoot, sub), 'sub/dir');
+  });
+
+  it('relPath resolves a symlinked directory to its target (yields empty at root)', async () => {
+    // A symlinked workspace folder: repoRoot resolves to git's realpath, so
+    // relPath must canonicalize the *whole* directory (including the symlink
+    // final component) to line up — otherwise it re-appends the unresolved
+    // symlink basename and produces an outside-repo pathspec.
+    const canonRoot = fs.realpathSync(root);
+    const link = path.join(os.tmpdir(), `gitdiff-link-${path.basename(root)}`);
+    try {
+      fs.symlinkSync(root, link, 'dir');
+    } catch {
+      // Some platforms/CI restrict symlink creation; skip rather than fail.
+      return;
+    }
+    try {
+      assert.strictEqual(svc.relPath(canonRoot, link), '');
+    } finally {
+      fs.rmSync(link, { force: true });
+    }
+  });
+
   it('listChangedPaths reports working-tree differences vs a ref', async () => {
     const wt = makeRepo();
     fs.writeFileSync(path.join(wt, 'kept.txt'), 'kept\n');
@@ -296,6 +331,93 @@ describe('GitService', function () {
     assert.ok(
       !canon.some((p: string) => p.endsWith('wt-stale')),
       `prunable worktree must be dropped, got ${JSON.stringify(canon)}`,
+    );
+  });
+});
+
+describe('GitService.repoRoot worktree resolution', function () {
+  this.timeout(20000);
+  const svc = new GitService();
+
+  // Regression: repoRoot() used to unconditionally path.dirname() its
+  // argument, assuming it was a file. The changed-files sidebar hands it the
+  // workspace *folder* (a directory) when no editor is active, so dirname()
+  // climbed one level above the worktree — into the main repo for a nested
+  // worktree, or a non-repo parent for a sibling. The fix uses a directory
+  // argument as-is. These tests pin that behaviour against real worktrees.
+
+  function setupMainWithWorktrees(): {
+    main: string;
+    nested: string;
+    sibling: string;
+  } {
+    const main = makeRepo();
+    fs.writeFileSync(path.join(main, 'seed.txt'), 'seed\n');
+    commit(main, 'seed');
+    git(main, ['branch', 'feat-nested']);
+    git(main, ['branch', 'feat-sibling']);
+    // Nested: lives inside the main repo's working tree — dirname() of this
+    // path is the main repo root, which is what used to break resolution.
+    const nested = path.join(main, 'nested-wt');
+    git(main, ['worktree', 'add', '-q', nested, 'feat-nested']);
+    // Sibling: lives next to the main repo (dirname() is a non-repo tmp dir).
+    const sibling = path.join(main, '..', `sibling-wt-${path.basename(main)}`);
+    git(main, ['worktree', 'add', '-q', sibling, 'feat-sibling']);
+    return { main, nested, sibling };
+  }
+
+  it('resolves a nested worktree directory to itself, not the main repo', async () => {
+    const { main, nested } = setupMainWithWorktrees();
+    const resolved = await svc.repoRoot(nested);
+    assert.strictEqual(
+      fs.realpathSync.native(resolved),
+      fs.realpathSync.native(nested),
+      'nested worktree folder must resolve to the worktree, not the parent main repo',
+    );
+    assert.notStrictEqual(
+      fs.realpathSync.native(resolved),
+      fs.realpathSync.native(main),
+    );
+  });
+
+  it('resolves a sibling worktree directory to itself', async () => {
+    const { sibling } = setupMainWithWorktrees();
+    const resolved = await svc.repoRoot(sibling);
+    assert.strictEqual(
+      fs.realpathSync.native(resolved),
+      fs.realpathSync.native(sibling),
+    );
+  });
+
+  it('resolves a file inside a nested worktree to that worktree', async () => {
+    const { nested } = setupMainWithWorktrees();
+    const file = path.join(nested, 'seed.txt');
+    const resolved = await svc.repoRoot(file);
+    assert.strictEqual(
+      fs.realpathSync.native(resolved),
+      fs.realpathSync.native(nested),
+    );
+  });
+
+  it('resolves the main repo directory to the main repo root', async () => {
+    const { main } = setupMainWithWorktrees();
+    const resolved = await svc.repoRoot(main);
+    assert.strictEqual(
+      fs.realpathSync.native(resolved),
+      fs.realpathSync.native(main),
+    );
+  });
+
+  it('changed paths from a nested worktree reflect the worktree HEAD, not the main repo', async () => {
+    const { nested } = setupMainWithWorktrees();
+    // Modify a file in the worktree only; the main repo's tree is untouched.
+    fs.writeFileSync(path.join(nested, 'seed.txt'), 'changed-in-worktree\n');
+    const repoRoot = await svc.repoRoot(nested);
+    const changes = await svc.listChangedPaths(repoRoot, 'HEAD');
+    const paths = changes.map((c: { relPath: string }) => c.relPath);
+    assert.ok(
+      paths.includes('seed.txt'),
+      `expected worktree edit to show as changed vs its own HEAD, got ${JSON.stringify(paths)}`,
     );
   });
 });
