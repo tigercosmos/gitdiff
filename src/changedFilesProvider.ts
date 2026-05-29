@@ -450,7 +450,11 @@ export function computeWorktreeExclusion(
 
 function canonicalize(p: string): string {
   try {
-    return fs.realpathSync(p);
+    // .native (not plain realpathSync) so Windows 8.3 short names and
+    // drive-letter case resolve to the same canonical long-name form as the
+    // git-sourced repoRoot these prefixes are compared against; otherwise
+    // nested-worktree exclusion silently fails on Windows.
+    return fs.realpathSync.native(p);
   } catch {
     return path.resolve(p);
   }

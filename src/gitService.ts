@@ -114,9 +114,15 @@ export class GitService {
    * unresolved symlink basename and producing an outside-repo pathspec.
    */
   relPath(repoRoot: string, absFilePath: string): string {
+    // Use realpathSync.native (not plain realpathSync): on Windows the legacy
+    // implementation leaves 8.3 short names (RUNNER~1) and drive-letter case
+    // as-is, whereas `repoRoot` comes from git's `--show-toplevel` already in
+    // long-name form (…runneradmin…). path.relative() between the two then
+    // climbs out of the repo ("../../…/RUNNER~1/…"). .native resolves both to
+    // the same canonical long-name form so the relative path stays in-repo.
     try {
       if (fs.statSync(absFilePath).isDirectory()) {
-        const canon = fs.realpathSync(absFilePath);
+        const canon = fs.realpathSync.native(absFilePath);
         return path.relative(repoRoot, canon).split(path.sep).join('/');
       }
     } catch {
@@ -126,7 +132,7 @@ export class GitService {
     const base = path.basename(absFilePath);
     let canonDir = dir;
     try {
-      canonDir = fs.realpathSync(dir);
+      canonDir = fs.realpathSync.native(dir);
     } catch {
       // dir may not exist yet (new file); fall through with raw dir.
     }
