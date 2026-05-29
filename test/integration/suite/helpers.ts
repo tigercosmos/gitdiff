@@ -29,7 +29,10 @@ export function commit(root: string, message: string): string {
 }
 
 export function realRepoPath(p: string): string {
-  return fs.realpathSync(p);
+  // .native to match production, which derives repoRoot from git's
+  // `--show-toplevel` (long-name, normalized drive case). Plain realpathSync
+  // leaves Windows 8.3 short names (RUNNER~1) in place, so it wouldn't match.
+  return fs.realpathSync.native(p);
 }
 
 /**

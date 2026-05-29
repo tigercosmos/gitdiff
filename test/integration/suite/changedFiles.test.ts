@@ -39,7 +39,7 @@ describe('changedFiles provider (e2e)', function () {
 
     await api.changedFiles.setTarget(
       { ref: headFull, display: headFull.slice(0, 8) },
-      fs.realpathSync(root),
+      fs.realpathSync.native(root),
     );
     await settle(50);
 
@@ -69,7 +69,7 @@ describe('changedFiles provider (e2e)', function () {
 
     await api.changedFiles.setTarget(
       { ref: headFull, display: headFull.slice(0, 8) },
-      fs.realpathSync(root),
+      fs.realpathSync.native(root),
     );
     await settle(50);
 
@@ -103,7 +103,7 @@ describe('changedFiles provider (e2e)', function () {
 
     await api.changedFiles.setTarget(
       { ref: headFull, display: headFull.slice(0, 8) },
-      fs.realpathSync(root),
+      fs.realpathSync.native(root),
     );
     await settle(50);
     const files = api.changedFiles.getAllFiles();
@@ -155,7 +155,7 @@ describe('changedFiles provider (e2e)', function () {
 
     await api.changedFiles.setTarget(
       { ref: headFull, display: headFull.slice(0, 8) },
-      fs.realpathSync(root),
+      fs.realpathSync.native(root),
     );
     await settle(50);
     const files = api.changedFiles.getAllFiles();
@@ -194,11 +194,11 @@ describe('changedFiles provider (e2e)', function () {
     // git call for A resolves later, the post-await guard must drop its result.
     const pA = api.changedFiles.setTarget(
       { ref: shaA, display: shaA.slice(0, 8) },
-      fs.realpathSync(rootA),
+      fs.realpathSync.native(rootA),
     );
     const pB = api.changedFiles.setTarget(
       { ref: shaB, display: shaB.slice(0, 8) },
-      fs.realpathSync(rootB),
+      fs.realpathSync.native(rootB),
     );
     await Promise.all([pA, pB]);
     await settle(80);
@@ -226,7 +226,7 @@ describe('changedFiles provider (e2e)', function () {
 
     await api.changedFiles.setTarget(
       { ref: headFull, display: headFull.slice(0, 8) },
-      fs.realpathSync(root),
+      fs.realpathSync.native(root),
     );
     await settle(50);
     const files = api.changedFiles.getAllFiles();
