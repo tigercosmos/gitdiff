@@ -96,6 +96,16 @@ describe('execGit', function () {
       },
     );
   });
+
+  it('writes optional stdin input to the git process', async () => {
+    const r = await execGit('git', ['hash-object', '--stdin'], root, {
+      input: 'hello\n',
+    });
+    assert.strictEqual(
+      r.stdout.toString('utf8').trim(),
+      'ce013625030ba8dba906f756967f9e9ca394464a',
+    );
+  });
 });
 
 describe('ExecError', () => {

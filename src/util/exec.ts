@@ -19,11 +19,17 @@ export class ExecError extends Error {
   }
 }
 
+export interface ExecGitOptions {
+  allowNonZero?: boolean;
+  maxBuffer?: number;
+  input?: string | Buffer;
+}
+
 export function execGit(
   gitPath: string,
   args: readonly string[],
   cwd: string,
-  options: { allowNonZero?: boolean; maxBuffer?: number } = {},
+  options: ExecGitOptions = {},
 ): Promise<ExecResult> {
   const opts: ExecFileOptions = {
     cwd,
@@ -32,7 +38,7 @@ export function execGit(
     windowsHide: true,
   };
   return new Promise((resolve, reject) => {
-    execFile(gitPath, [...args], opts, (err, stdout, stderr) => {
+    const child = execFile(gitPath, [...args], opts, (err, stdout, stderr) => {
       const out = stdout as unknown as Buffer;
       const errBuf = stderr as unknown as Buffer;
 
@@ -68,5 +74,12 @@ export function execGit(
       }
       resolve({ stdout: out, stderr: errBuf, code: 0 });
     });
+    if (options.input !== undefined) {
+      child.stdin?.on('error', () => {
+        // The execFile callback above reports git failures; avoid an
+        // unhandled stdin EPIPE if git exits before consuming provided input.
+      });
+      child.stdin?.end(options.input);
+    }
   });
 }

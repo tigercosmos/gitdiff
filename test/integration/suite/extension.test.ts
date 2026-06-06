@@ -16,6 +16,25 @@ import {
 import * as fs from 'fs';
 import * as path from 'path';
 
+function contentToString(content: vscode.MarkdownString | vscode.MarkedString): string {
+  if (typeof content === 'string') return content;
+  if ('value' in content) return content.value;
+  return '';
+}
+
+async function hoverText(uri: vscode.Uri, line: number): Promise<string> {
+  const hovers =
+    (await vscode.commands.executeCommand<vscode.Hover[]>(
+      'vscode.executeHoverProvider',
+      uri,
+      new vscode.Position(line, 0),
+    )) ?? [];
+
+  return hovers
+    .flatMap((hover) => hover.contents.map(contentToString))
+    .join('\n');
+}
+
 describe('gitdiff e2e', function () {
   this.timeout(30000);
 
@@ -129,6 +148,100 @@ describe('gitdiff e2e', function () {
         !(active?.input instanceof vscode.TabInputTextDiff),
         'expected no diff tab',
       );
+    });
+  });
+
+  describe('Blame hovers', () => {
+    it('shows author and commit summary on both panes of an active GitDiff diff', async () => {
+      const root = makeRepo();
+      const filePath = path.join(root, 'a.txt');
+      fs.writeFileSync(filePath, 'stable line\ncommitted second\n');
+      commit(root, 'initial');
+      fs.writeFileSync(filePath, 'stable line\nworking second\n');
+
+      const fileUri = vscode.Uri.file(filePath);
+      await vscode.window.showTextDocument(fileUri);
+      await withQuickPickPicking(
+        (i) => typeof i.label === 'string' && i.label.includes('main'),
+        () => vscode.commands.executeCommand('gitdiff.compareWithBranch', fileUri),
+      );
+      await settle();
+
+      const tab = vscode.window.tabGroups.activeTabGroup.activeTab!;
+      assert.ok(tab.input instanceof vscode.TabInputTextDiff);
+      const input = tab.input as vscode.TabInputTextDiff;
+
+      const leftHover = await hoverText(input.original, 0);
+      assert.ok(leftHover.includes('Author:'), leftHover);
+      assert.ok(leftHover.includes('Test'), leftHover);
+      assert.ok(leftHover.includes('Commit:'), leftHover);
+      assert.ok(leftHover.includes('initial'), leftHover);
+
+      const rightHover = await hoverText(input.modified, 0);
+      assert.ok(rightHover.includes('Author:'), rightHover);
+      assert.ok(rightHover.includes('Test'), rightHover);
+      assert.ok(rightHover.includes('Commit:'), rightHover);
+      assert.ok(rightHover.includes('initial'), rightHover);
+    });
+
+    it('uses unsaved right-pane contents when visible line numbers shift', async () => {
+      const root = makeRepo();
+      const filePath = path.join(root, 'a.txt');
+      fs.writeFileSync(filePath, 'first\n');
+      commit(root, 'first line');
+      fs.writeFileSync(filePath, 'first\nsecond\n');
+      commit(root, 'second line');
+
+      const fileUri = vscode.Uri.file(filePath);
+      await vscode.window.showTextDocument(fileUri);
+      await withQuickPickPicking(
+        (i) => typeof i.label === 'string' && i.label.includes('main'),
+        () => vscode.commands.executeCommand('gitdiff.compareWithBranch', fileUri),
+      );
+      await settle();
+
+      const tab = vscode.window.tabGroups.activeTabGroup.activeTab!;
+      assert.ok(tab.input instanceof vscode.TabInputTextDiff);
+      const input = tab.input as vscode.TabInputTextDiff;
+
+      let inserted = false;
+      try {
+        const edit = new vscode.WorkspaceEdit();
+        edit.insert(input.modified, new vscode.Position(0, 0), 'unsaved\n');
+        inserted = await vscode.workspace.applyEdit(edit);
+        assert.strictEqual(inserted, true);
+
+        const rightHover = (await hoverText(input.modified, 1)).replace(/&nbsp;/g, ' ');
+        assert.ok(rightHover.includes('Author:'), rightHover);
+        assert.ok(rightHover.includes('Test'), rightHover);
+        assert.ok(rightHover.includes('first line'), rightHover);
+        assert.ok(!rightHover.includes('second line'), rightHover);
+      } finally {
+        if (inserted) {
+          const cleanup = new vscode.WorkspaceEdit();
+          cleanup.delete(
+            input.modified,
+            new vscode.Range(new vscode.Position(0, 0), new vscode.Position(1, 0)),
+          );
+          await vscode.workspace.applyEdit(cleanup);
+          const doc = await vscode.workspace.openTextDocument(input.modified);
+          if (doc.isDirty) await doc.save();
+        }
+      }
+    });
+
+    it('does not add GitDiff blame hovers to regular file editors', async () => {
+      const root = makeRepo();
+      const filePath = path.join(root, 'a.txt');
+      fs.writeFileSync(filePath, 'plain file\n');
+      commit(root, 'initial');
+
+      await vscode.window.showTextDocument(vscode.Uri.file(filePath));
+      await settle();
+
+      const text = await hoverText(vscode.Uri.file(filePath), 0);
+      assert.ok(!text.includes('Author:'), text);
+      assert.ok(!text.includes('Commit:'), text);
     });
   });
 

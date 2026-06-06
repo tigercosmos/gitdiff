@@ -47,6 +47,17 @@ export interface CommitInfo {
   author: string;
 }
 
+export interface BlameInfo {
+  shortSha: string;
+  fullSha: string;
+  author: string;
+  summary: string;
+  /** Author time as Unix epoch seconds; 0 when absent (e.g. uncommitted). */
+  authorTime: number;
+  /** Author timezone offset as git emits it, e.g. "+0800"; '' when absent. */
+  authorTz: string;
+}
+
 export interface BranchInfo {
   name: string;
   /** True for refs/remotes/* entries. */
@@ -58,6 +69,45 @@ export interface ShowResult {
   /** Raw bytes from `git show`. Empty when `exists` is false. */
   bytes: Buffer;
   kind: BlobKind;
+}
+
+export function parseBlameLinePorcelain(text: string): BlameInfo | undefined {
+  const lines = text.split(/\r?\n/);
+  const first = lines[0]?.trim();
+  if (!first) return undefined;
+
+  const fullSha = first.split(/\s+/, 1)[0];
+  if (!fullSha) return undefined;
+
+  let author = '';
+  let summary = '';
+  let authorTime = 0;
+  let authorTz = '';
+  for (const line of lines) {
+    // `author ` must be tested before the `author-*` keys: `'author-time'`
+    // does not start with `'author '` (index 6 is '-', not a space), so the
+    // order is unambiguous, but keep `author-time`/`author-tz` as their own
+    // branches rather than nesting under a generic `author` prefix.
+    if (line.startsWith('author ')) {
+      author = line.slice('author '.length);
+    } else if (line.startsWith('author-time ')) {
+      const n = Number(line.slice('author-time '.length).trim());
+      if (Number.isFinite(n)) authorTime = n;
+    } else if (line.startsWith('author-tz ')) {
+      authorTz = line.slice('author-tz '.length).trim();
+    } else if (line.startsWith('summary ')) {
+      summary = line.slice('summary '.length);
+    }
+  }
+
+  return {
+    fullSha,
+    shortSha: fullSha.slice(0, 8),
+    author: author || 'Unknown author',
+    summary: summary || '(no commit subject)',
+    authorTime,
+    authorTz,
+  };
 }
 
 export class GitService {
@@ -206,6 +256,57 @@ export class GitService {
       });
     }
     return commits;
+  }
+
+  async blameLine(
+    repoRoot: string,
+    relPath: string,
+    line: number,
+    ref?: string,
+  ): Promise<BlameInfo | undefined> {
+    if (!Number.isInteger(line) || line < 1) return undefined;
+    if (ref?.startsWith('-')) {
+      throw new Error(`GitDiff: refs cannot begin with '-' (got '${ref}').`);
+    }
+
+    const args = ['blame', '--line-porcelain', '-L', `${line},${line}`];
+    if (ref) args.push(ref);
+    args.push('--', relPath);
+
+    const r = await execGit(this.gitPath(), args, repoRoot, { allowNonZero: true });
+    if (r.code !== 0) return undefined;
+    return parseBlameLinePorcelain(r.stdout.toString('utf8'));
+  }
+
+  async blameLineForContents(
+    repoRoot: string,
+    relPath: string,
+    line: number,
+    contents: string,
+    ref?: string,
+  ): Promise<BlameInfo | undefined> {
+    if (!Number.isInteger(line) || line < 1) return undefined;
+    if (ref?.startsWith('-')) {
+      throw new Error(`GitDiff: refs cannot begin with '-' (got '${ref}').`);
+    }
+
+    const args = [
+      'blame',
+      '--line-porcelain',
+      '--contents',
+      '-',
+      '-L',
+      `${line},${line}`,
+    ];
+    if (ref) args.push(ref);
+    args.push('--', relPath);
+
+    const r = await execGit(this.gitPath(), args, repoRoot, {
+      allowNonZero: true,
+      input: contents,
+    });
+    if (r.code !== 0) return undefined;
+    return parseBlameLinePorcelain(r.stdout.toString('utf8'));
   }
 
   /**

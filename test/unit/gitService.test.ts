@@ -16,7 +16,7 @@ Module._resolveFilename = function (request: string, ...rest: unknown[]) {
 };
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { GitService, parseNameStatusZ } = require('../../src/gitService');
+const { GitService, parseBlameLinePorcelain, parseNameStatusZ } = require('../../src/gitService');
 
 function git(cwd: string, args: string[]): void {
   execFileSync('git', args, { cwd, stdio: 'pipe' });
@@ -185,6 +185,63 @@ describe('GitService', function () {
   it('listCommits respects the limit', async () => {
     const limited = await svc.listCommits(root, 1);
     assert.strictEqual(limited.length, 1);
+  });
+
+  it('parseBlameLinePorcelain returns author and commit summary', () => {
+    const parsed = parseBlameLinePorcelain(
+      [
+        '0123456789abcdef0123456789abcdef01234567 3 1 1',
+        'author Jane Doe',
+        'author-mail <jane@example.com>',
+        'author-time 1780759591',
+        'author-tz +0800',
+        'committer Someone Else',
+        'summary Add useful feature',
+        'filename a.txt',
+        '\tline text',
+      ].join('\n'),
+    );
+
+    assert.deepStrictEqual(parsed, {
+      fullSha: '0123456789abcdef0123456789abcdef01234567',
+      shortSha: '01234567',
+      author: 'Jane Doe',
+      summary: 'Add useful feature',
+      authorTime: 1780759591,
+      authorTz: '+0800',
+    });
+  });
+
+  it('blameLine reports author and commit summary for a line at HEAD', async () => {
+    const info = await svc.blameLine(root, 'a.txt', 1, 'HEAD');
+    assert.ok(info);
+    assert.strictEqual(info.author, 'Test');
+    assert.strictEqual(info.summary, 'second');
+    assert.match(info.fullSha, /^[0-9a-f]{40}$/);
+  });
+
+  it('blameLine reports author and commit summary for a line at a target ref', async () => {
+    const commits = await svc.listCommits(root, 10);
+    const first = commits.find((c: { subject: string }) => c.subject === 'first');
+    assert.ok(first);
+
+    const info = await svc.blameLine(root, 'b.txt', 1, first.fullSha);
+    assert.ok(info);
+    assert.strictEqual(info.author, 'Test');
+    assert.strictEqual(info.summary, 'first');
+    assert.strictEqual(info.fullSha, first.fullSha);
+  });
+
+  it('blameLineForContents maps blame to supplied unsaved contents', async () => {
+    const info = await svc.blameLineForContents(
+      root,
+      'a.txt',
+      2,
+      'unsaved insertion\nhello world\n',
+    );
+    assert.ok(info);
+    assert.strictEqual(info.author, 'Test');
+    assert.strictEqual(info.summary, 'second');
   });
 
   it('listCommits rejects in an empty repo (no HEAD commits)', async () => {

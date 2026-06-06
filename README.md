@@ -37,6 +37,7 @@ GitDiff does exactly that — and unlike a read-only `git diff`, **the working-t
 - **Compare against any commit** — recent commits in a picker, plus a free-form "Enter SHA…" option.
 - **Editable right pane** — it's the real file on disk. Edit and save like any normal editor.
 - **Read-only left pane** — backed by `git show <ref>:<path>`, so you can't accidentally clobber history.
+- **Blame on hover** — hover any line in either pane to see the last commit that touched it (author, date, commit subject, short SHA). The right pane blames your live working-tree contents, so it stays accurate as you edit; uncommitted lines show a clean "Not committed yet".
 - **Changed-Files sidebar** — pick a target once, see every file in your tree that differs from it, click to open the diff.
 - **Search + path filters in the sidebar** — narrow the changed-files list with a content search (match case / whole word / regex toggles, mirroring VS Code Search) plus comma-separated `files to include` / `files to exclude` glob inputs.
 - **Live branch tracking** — when comparing against a branch, "Refresh" re-resolves it to the current tip.
@@ -54,7 +55,7 @@ ext install tigercosmos.gitdiff
 **From a `.vsix`**
 
 ```bash
-code --install-extension gitdiff-0.2.0.vsix
+code --install-extension gitdiff-0.4.0.vsix
 ```
 
 ## Usage
@@ -68,6 +69,8 @@ code --install-extension gitdiff-0.2.0.vsix
 3. Pick a target. The diff opens with **the target on the left** (read-only) and **your working-tree file on the right** (editable).
 
 You can also right-click a file in the Explorer or on the editor tab to launch either command.
+
+Hover over any line in the diff to see the last commit that touched it — author, date, commit subject, and short SHA.
 
 ### Browse every changed file
 
@@ -121,6 +124,7 @@ When a GitDiff diff is the active editor:
 │  RefPicker           — QuickPick UI for branches and commits │
 │  DiffOpener          — builds URIs and calls vscode.diff     │
 │  GitShowProvider     — TextDocumentContentProvider (left)    │
+│  BlameHoverProvider  — per-line blame hover on both panes    │
 │  ChangedFilesProvider — WebviewView for the sidebar          │
 │  ActiveDiffTracker   — maintains the activeDiff context key  │
 └──────────────────────────────────────────────────────────────┘

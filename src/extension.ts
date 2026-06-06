@@ -6,6 +6,7 @@ import { DiffOpener } from './diffOpener';
 import { RefPicker } from './refPicker';
 import { decodeGitdiffUri } from './util/uri';
 import { ChangedFilesProvider, ChangedFile, VIEW_ID } from './changedFilesProvider';
+import { BlameHoverProvider } from './blameHoverProvider';
 
 export interface GitDiffExports {
   /** Internal — exposed only so integration tests can inspect filter state. */
@@ -16,6 +17,7 @@ export function activate(context: vscode.ExtensionContext): GitDiffExports {
   const git = new GitService();
   const provider = new GitShowProvider(git);
   const tracker = new ActiveDiffTracker();
+  const blameHoverProvider = new BlameHoverProvider(git, tracker);
   const opener = new DiffOpener(git);
   const picker = new RefPicker(git);
   const changedFiles = new ChangedFilesProvider(
@@ -41,7 +43,12 @@ export function activate(context: vscode.ExtensionContext): GitDiffExports {
 
   context.subscriptions.push(
     vscode.workspace.registerTextDocumentContentProvider(GITDIFF_SCHEME, provider),
+    vscode.languages.registerHoverProvider(
+      [{ scheme: GITDIFF_SCHEME }, { scheme: 'file' }],
+      blameHoverProvider,
+    ),
     tracker,
+    blameHoverProvider,
     vscode.commands.registerCommand('gitdiff.compareWithBranch', (uri?: vscode.Uri) =>
       runCompare('branch', uri, picker, opener, changedFiles),
     ),

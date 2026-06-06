@@ -45,11 +45,51 @@ export class EventEmitter<T> {
 }
 
 export class Uri {
+  readonly scheme: string;
+  readonly path: string;
+  readonly query: string;
+
   static file(p: string): Uri {
-    return new Uri(p);
+    return new Uri('file', p, '', p);
   }
-  static from(_: unknown): Uri {
-    return new Uri('');
+  static from(parts: { scheme?: string; path?: string; query?: string }): Uri {
+    return new Uri(parts.scheme ?? '', parts.path ?? '', parts.query ?? '');
   }
-  constructor(public readonly fsPath: string) {}
+  constructor(
+    schemeOrFsPath: string,
+    path = '',
+    query = '',
+    public readonly fsPath = '',
+  ) {
+    this.scheme = path ? schemeOrFsPath : '';
+    this.path = path || schemeOrFsPath;
+    this.query = query;
+  }
+  toString(): string {
+    const query = this.query ? `?${this.query}` : '';
+    return `${this.scheme}:${this.path}${query}`;
+  }
+}
+
+export class MarkdownString {
+  value = '';
+  isTrusted: boolean | undefined;
+
+  constructor(value?: string, _supportThemeIcons?: boolean) {
+    this.value = value ?? '';
+  }
+
+  appendMarkdown(value: string): MarkdownString {
+    this.value += value;
+    return this;
+  }
+
+  appendText(value: string): MarkdownString {
+    this.value += value;
+    return this;
+  }
+}
+
+export class Hover {
+  constructor(public readonly contents: unknown) {}
 }
