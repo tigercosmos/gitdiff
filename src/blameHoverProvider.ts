@@ -3,6 +3,22 @@ import { ActiveDiffTracker } from './activeDiffTracker';
 import { GITDIFF_SCHEME } from './gitShowProvider';
 import { BlameInfo, GitService } from './gitService';
 import { decodeGitdiffUri } from './util/uri';
+import {
+  BlameLinks,
+  isUncommitted,
+  OPEN_COMMIT_DIFF_COMMAND,
+  renderBlameMarkdown,
+} from './blameFormat';
+import {
+  buildCommitUrl,
+  buildPrUrl,
+  detectPullRequest,
+  parseRemoteWebBase,
+  RemoteWeb,
+} from './util/gitRemote';
+
+// Re-exported for callers/tests that imported it from here historically.
+export { formatBlameDate } from './blameFormat';
 
 interface BlameTarget {
   repoRoot: string;
@@ -13,6 +29,45 @@ interface BlameTarget {
   uriKey?: string;
 }
 
+/**
+ * Build the rich hover/decoration links for a blamed line: an in-editor "open
+ * this commit's diff for the file" command, and (when a remote is configured)
+ * web links to the commit and its pull/merge request. `remoteFor` is provided
+ * by the caller so the remote-URL lookup can be cached per repo root.
+ */
+export async function buildBlameLinks(
+  info: BlameInfo,
+  repoRoot: string,
+  relPath: string,
+  remoteFor: (repoRoot: string) => Promise<RemoteWeb | undefined>,
+): Promise<BlameLinks> {
+  if (isUncommitted(info.fullSha)) return {};
+  // Open the diff against the path the file had *at the blamed commit*: when the
+  // line predates a rename, git blame attributes it to a commit where the file
+  // lived under its old name, and `sha:currentPath` would be empty/wrong.
+  const blamedPath = info.filename || relPath;
+  // A command: URI carries its arguments as a URI-encoded JSON *array* of
+  // positional args; our handler takes a single options object, so wrap it.
+  const args = encodeURIComponent(
+    JSON.stringify([{ repoRoot, relPath: blamedPath, sha: info.fullSha }]),
+  );
+  const links: BlameLinks = {
+    openFileDiffCommand: `command:${OPEN_COMMIT_DIFF_COMMAND}?${args}`,
+  };
+  const remote = await remoteFor(repoRoot);
+  if (remote) {
+    links.commitUrl = buildCommitUrl(remote, info.fullSha);
+    const pr = detectPullRequest(info.summary);
+    if (pr) {
+      links.pr = {
+        url: buildPrUrl(remote, pr),
+        label: `${pr.kind === 'mr' ? '!' : '#'}${pr.number}`,
+      };
+    }
+  }
+  return links;
+}
+
 export class BlameHoverProvider implements vscode.HoverProvider, vscode.Disposable {
   // Bounded LRU-ish cache. The provider lives for the whole session and the
   // contents-based key includes document.version, so an unbounded Map would
@@ -20,6 +75,7 @@ export class BlameHoverProvider implements vscode.HoverProvider, vscode.Disposab
   // oldest insertion (Map preserves insertion order) once full.
   private static readonly MAX_CACHE = 256;
   private readonly cache = new Map<string, Promise<BlameInfo | undefined>>();
+  private readonly remoteCache = new Map<string, Promise<RemoteWeb | undefined>>();
 
   constructor(
     private readonly git: GitService,
@@ -28,6 +84,7 @@ export class BlameHoverProvider implements vscode.HoverProvider, vscode.Disposab
 
   dispose(): void {
     this.cache.clear();
+    this.remoteCache.clear();
   }
 
   async provideHover(
@@ -46,7 +103,30 @@ export class BlameHoverProvider implements vscode.HoverProvider, vscode.Disposab
     }
     if (token.isCancellationRequested || !info) return undefined;
 
-    return new vscode.Hover(this.render(info));
+    const links = await buildBlameLinks(
+      info,
+      target.repoRoot,
+      target.relPath,
+      (root) => this.remote(root),
+    );
+    if (token.isCancellationRequested) return undefined;
+
+    return new vscode.Hover(renderBlameMarkdown(info, links));
+  }
+
+  /** Cached parse of a repo's `origin` remote into a browsable web base. */
+  private remote(repoRoot: string): Promise<RemoteWeb | undefined> {
+    let cached = this.remoteCache.get(repoRoot);
+    if (!cached) {
+      // Remote URL is best-effort (links only); swallow any failure to
+      // undefined so a hover never breaks on a repo without a usable remote.
+      cached = Promise.resolve()
+        .then(() => this.git.remoteUrl(repoRoot))
+        .then((url) => (url ? parseRemoteWebBase(url) : undefined))
+        .catch(() => undefined);
+      this.remoteCache.set(repoRoot, cached);
+    }
+    return cached;
   }
 
   private targetForDocument(document: vscode.TextDocument): BlameTarget | undefined {
@@ -115,54 +195,4 @@ export class BlameHoverProvider implements vscode.HoverProvider, vscode.Disposab
     }
     return cached;
   }
-
-  private render(info: BlameInfo): vscode.MarkdownString {
-    const md = new vscode.MarkdownString(undefined, true);
-    md.isTrusted = false;
-    // An all-zero SHA is git's sentinel for a line not in any commit (e.g. an
-    // unsaved/uncommitted edit on the working-tree pane). git fills the author
-    // and summary with placeholders ("Not Committed Yet", "Version of … from
-    // standard input") that are noise to the reader — show a clean label.
-    if (isUncommitted(info.fullSha)) {
-      md.appendText('Not committed yet');
-      return md;
-    }
-    md.appendMarkdown('**Author:** ');
-    md.appendText(info.author);
-    const date = formatBlameDate(info.authorTime, info.authorTz);
-    if (date) {
-      md.appendMarkdown('\n\n**Date:** ');
-      md.appendText(date);
-    }
-    md.appendMarkdown('\n\n**Commit:** ');
-    md.appendText(info.summary);
-    md.appendMarkdown('\n\n`');
-    md.appendText(info.shortSha);
-    md.appendMarkdown('`');
-    return md;
-  }
-}
-
-function isUncommitted(sha: string): boolean {
-  return /^0{40}$/.test(sha);
-}
-
-/**
- * Format git's `author-time` (Unix epoch seconds) into the commit's own
- * wall-clock time using its `author-tz` offset (e.g. "+0800"), as
- * `YYYY-MM-DD HH:MM ±TZ`. Pure and timezone-stable: it shifts the epoch by the
- * offset and reads UTC fields, so it doesn't depend on the host's local zone.
- * Returns '' for missing/invalid input so the caller can omit the line.
- */
-export function formatBlameDate(epochSeconds: number, tz: string): string {
-  if (!Number.isFinite(epochSeconds) || epochSeconds <= 0) return '';
-  const m = /^([+-])(\d{2})(\d{2})$/.exec(tz);
-  const offsetMinutes = m ? (m[1] === '-' ? -1 : 1) * (Number(m[2]) * 60 + Number(m[3])) : 0;
-  const shifted = new Date((epochSeconds + offsetMinutes * 60) * 1000);
-  const yyyy = shifted.getUTCFullYear();
-  const mm = String(shifted.getUTCMonth() + 1).padStart(2, '0');
-  const dd = String(shifted.getUTCDate()).padStart(2, '0');
-  const hh = String(shifted.getUTCHours()).padStart(2, '0');
-  const min = String(shifted.getUTCMinutes()).padStart(2, '0');
-  return `${yyyy}-${mm}-${dd} ${hh}:${min}${m ? ` ${tz}` : ''}`;
 }

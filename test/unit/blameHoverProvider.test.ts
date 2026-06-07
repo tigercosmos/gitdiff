@@ -10,7 +10,7 @@ Module._resolveFilename = function (request: string, ...rest: unknown[]) {
 };
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { BlameHoverProvider, formatBlameDate } = require('../../src/blameHoverProvider');
+const { BlameHoverProvider, formatBlameDate, buildBlameLinks } = require('../../src/blameHoverProvider');
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { encodeGitdiffUri } = require('../../src/util/uri');
 
@@ -375,6 +375,70 @@ describe('BlameHoverProvider', () => {
 
     assert.strictEqual(hover, undefined);
     assert.strictEqual(contentsSeen, '');
+  });
+});
+
+describe('buildBlameLinks', () => {
+  const committed = {
+    fullSha: '1234567890abcdef1234567890abcdef12345678',
+    shortSha: '12345678',
+    author: 'Jane Doe',
+    summary: 'Fix the parser (#42)',
+    authorTime: 1780759591,
+    authorTz: '+0800',
+  };
+
+  it('encodes the open-commit-diff command with the repo/path/sha args', async () => {
+    const links = await buildBlameLinks(committed, '/repo', 'src/a.ts', async () => undefined);
+    assert.ok(links.openFileDiffCommand.startsWith('command:gitdiff.openCommitDiffForFile?'));
+    const json = decodeURIComponent(links.openFileDiffCommand.split('?')[1]);
+    // VS Code command URIs carry a JSON *array* of positional arguments.
+    assert.deepStrictEqual(JSON.parse(json), [
+      {
+        repoRoot: '/repo',
+        relPath: 'src/a.ts',
+        sha: committed.fullSha,
+      },
+    ]);
+    // No remote -> no web links.
+    assert.strictEqual(links.commitUrl, undefined);
+    assert.strictEqual(links.pr, undefined);
+  });
+
+  it('adds commit and PR web links when a remote is present', async () => {
+    const remote = { host: 'github.com', base: 'https://github.com/o/r' };
+    const links = await buildBlameLinks(committed, '/repo', 'src/a.ts', async () => remote);
+    assert.strictEqual(links.commitUrl, `https://github.com/o/r/commit/${committed.fullSha}`);
+    assert.deepStrictEqual(links.pr, {
+      url: 'https://github.com/o/r/pull/42',
+      label: '#42',
+    });
+  });
+
+  it('uses the blamed filename (not the current path) for the open-diff command', async () => {
+    const renamed = { ...committed, filename: 'old/path.txt' };
+    const links = await buildBlameLinks(renamed, '/repo', 'new/path.txt', async () => undefined);
+    const args = JSON.parse(decodeURIComponent(links.openFileDiffCommand.split('?')[1]));
+    assert.strictEqual(args[0].relPath, 'old/path.txt', 'must open the path at the blamed commit');
+    assert.strictEqual(args[0].sha, committed.fullSha);
+  });
+
+  it('falls back to the current path when blame reports no filename', async () => {
+    const links = await buildBlameLinks(committed, '/repo', 'src/a.ts', async () => undefined);
+    const args = JSON.parse(decodeURIComponent(links.openFileDiffCommand.split('?')[1]));
+    assert.strictEqual(args[0].relPath, 'src/a.ts');
+  });
+
+  it('returns no links for an uncommitted line', async () => {
+    const links = await buildBlameLinks(
+      { ...committed, fullSha: '0'.repeat(40) },
+      '/repo',
+      'src/a.ts',
+      async () => {
+        throw new Error('remote must not be consulted for uncommitted lines');
+      },
+    );
+    assert.deepStrictEqual(links, {});
   });
 });
 

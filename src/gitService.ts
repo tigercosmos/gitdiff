@@ -56,6 +56,13 @@ export interface BlameInfo {
   authorTime: number;
   /** Author timezone offset as git emits it, e.g. "+0800"; '' when absent. */
   authorTz: string;
+  /**
+   * The file's path *at the blamed commit*, from the porcelain `filename`
+   * line. Differs from the caller's current path when the line predates a
+   * rename — callers opening `sha:path` must use this, not the live path.
+   * '' when git omits it.
+   */
+  filename: string;
 }
 
 export interface BranchInfo {
@@ -71,6 +78,48 @@ export interface ShowResult {
   kind: BlobKind;
 }
 
+/**
+ * Decode git's C-quoted path form (`"src/caf\303\251.txt"`) back to a literal
+ * UTF-8 path. git quotes paths with non-ASCII or control characters when
+ * `core.quotePath` is on (the default); octal `\NNN` escapes are raw bytes that
+ * must be reassembled and decoded as UTF-8. An unquoted value is returned as-is.
+ */
+export function unquoteGitPath(raw: string): string {
+  if (raw.length < 2 || raw[0] !== '"' || raw[raw.length - 1] !== '"') return raw;
+  const body = raw.slice(1, -1);
+  const simple: Record<string, number> = {
+    a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13, '"': 34, '\\': 92,
+  };
+  const bytes: number[] = [];
+  for (let i = 0; i < body.length; i++) {
+    if (body[i] !== '\\') {
+      for (const b of Buffer.from(body[i], 'utf8')) bytes.push(b);
+      continue;
+    }
+    const next = body[i + 1];
+    if (next === undefined) {
+      bytes.push(0x5c);
+      break;
+    }
+    if (next >= '0' && next <= '7') {
+      let oct = next;
+      i++;
+      for (let k = 0; k < 2 && body[i + 1] >= '0' && body[i + 1] <= '7'; k++) {
+        oct += body[i + 1];
+        i++;
+      }
+      bytes.push(parseInt(oct, 8) & 0xff);
+    } else if (next in simple) {
+      bytes.push(simple[next]);
+      i++;
+    } else {
+      // Unknown escape — keep the backslash literally, don't consume `next`.
+      bytes.push(0x5c);
+    }
+  }
+  return Buffer.from(bytes).toString('utf8');
+}
+
 export function parseBlameLinePorcelain(text: string): BlameInfo | undefined {
   const lines = text.split(/\r?\n/);
   const first = lines[0]?.trim();
@@ -83,6 +132,7 @@ export function parseBlameLinePorcelain(text: string): BlameInfo | undefined {
   let summary = '';
   let authorTime = 0;
   let authorTz = '';
+  let filename = '';
   for (const line of lines) {
     // `author ` must be tested before the `author-*` keys: `'author-time'`
     // does not start with `'author '` (index 6 is '-', not a space), so the
@@ -97,6 +147,8 @@ export function parseBlameLinePorcelain(text: string): BlameInfo | undefined {
       authorTz = line.slice('author-tz '.length).trim();
     } else if (line.startsWith('summary ')) {
       summary = line.slice('summary '.length);
+    } else if (line.startsWith('filename ')) {
+      filename = unquoteGitPath(line.slice('filename '.length));
     }
   }
 
@@ -107,6 +159,7 @@ export function parseBlameLinePorcelain(text: string): BlameInfo | undefined {
     summary: summary || '(no commit subject)',
     authorTime,
     authorTz,
+    filename,
   };
 }
 
@@ -269,7 +322,9 @@ export class GitService {
       throw new Error(`GitDiff: refs cannot begin with '-' (got '${ref}').`);
     }
 
-    const args = ['blame', '--line-porcelain', '-L', `${line},${line}`];
+    // core.quotePath=false: emit the porcelain `filename` verbatim (UTF-8)
+    // instead of C-quoting non-ASCII paths, so the value is usable as-is.
+    const args = ['-c', 'core.quotePath=false', 'blame', '--line-porcelain', '-L', `${line},${line}`];
     if (ref) args.push(ref);
     args.push('--', relPath);
 
@@ -291,6 +346,8 @@ export class GitService {
     }
 
     const args = [
+      '-c',
+      'core.quotePath=false',
       'blame',
       '--line-porcelain',
       '--contents',
@@ -307,6 +364,58 @@ export class GitService {
     });
     if (r.code !== 0) return undefined;
     return parseBlameLinePorcelain(r.stdout.toString('utf8'));
+  }
+
+  /**
+   * URL of the `origin` remote (falling back to the first configured remote),
+   * or undefined when the repo has no remote. Used only to build web links —
+   * never fed back into a git invocation, so a non-zero exit is non-fatal.
+   */
+  async remoteUrl(repoRoot: string): Promise<string | undefined> {
+    const origin = await execGit(
+      this.gitPath(),
+      ['remote', 'get-url', 'origin'],
+      repoRoot,
+      { allowNonZero: true },
+    );
+    if (origin.code === 0) {
+      const url = origin.stdout.toString('utf8').trim();
+      if (url) return url;
+    }
+    // No `origin` — use whatever remote is configured first, if any.
+    const list = await execGit(this.gitPath(), ['remote'], repoRoot, { allowNonZero: true });
+    if (list.code !== 0) return undefined;
+    const first = list.stdout.toString('utf8').split('\n').map((s) => s.trim()).filter(Boolean)[0];
+    if (!first) return undefined;
+    const other = await execGit(
+      this.gitPath(),
+      ['remote', 'get-url', '--end-of-options', first],
+      repoRoot,
+      { allowNonZero: true },
+    );
+    if (other.code !== 0) return undefined;
+    const url = other.stdout.toString('utf8').trim();
+    return url || undefined;
+  }
+
+  /**
+   * Full SHA of `sha`'s first parent, or undefined for a root commit (no
+   * parent). `sha` must already be a verified full SHA. Used to diff a commit
+   * against its predecessor for a single file.
+   */
+  async parentSha(repoRoot: string, sha: string): Promise<string | undefined> {
+    if (sha.startsWith('-')) {
+      throw new Error(`GitDiff: refs cannot begin with '-' (got '${sha}').`);
+    }
+    const r = await execGit(
+      this.gitPath(),
+      ['rev-parse', '--verify', '--end-of-options', `${sha}^`],
+      repoRoot,
+      { allowNonZero: true },
+    );
+    if (r.code !== 0) return undefined;
+    const out = r.stdout.toString('utf8').trim();
+    return out || undefined;
   }
 
   /**

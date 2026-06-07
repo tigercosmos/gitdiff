@@ -16,7 +16,12 @@ Module._resolveFilename = function (request: string, ...rest: unknown[]) {
 };
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { GitService, parseBlameLinePorcelain, parseNameStatusZ } = require('../../src/gitService');
+const {
+  GitService,
+  parseBlameLinePorcelain,
+  parseNameStatusZ,
+  unquoteGitPath,
+} = require('../../src/gitService');
 
 function git(cwd: string, args: string[]): void {
   execFileSync('git', args, { cwd, stdio: 'pipe' });
@@ -209,7 +214,59 @@ describe('GitService', function () {
       summary: 'Add useful feature',
       authorTime: 1780759591,
       authorTz: '+0800',
+      filename: 'a.txt',
     });
+  });
+
+  it('unquoteGitPath leaves an unquoted path untouched', () => {
+    assert.strictEqual(unquoteGitPath('src/a.ts'), 'src/a.ts');
+    assert.strictEqual(unquoteGitPath('dir/with spaces.txt'), 'dir/with spaces.txt');
+  });
+
+  it('unquoteGitPath decodes C-quoted octal UTF-8 (default core.quotePath)', () => {
+    // git's quoting of `src/café-日.txt`
+    assert.strictEqual(
+      unquoteGitPath('"src/caf\\303\\251-\\346\\227\\245.txt"'),
+      'src/café-日.txt',
+    );
+  });
+
+  it('unquoteGitPath decodes simple escapes (\\t, \\", \\\\)', () => {
+    assert.strictEqual(unquoteGitPath('"a\\tb"'), 'a\tb');
+    assert.strictEqual(unquoteGitPath('"a\\"b"'), 'a"b');
+    assert.strictEqual(unquoteGitPath('"a\\\\b"'), 'a\\b');
+  });
+
+  it('parseBlameLinePorcelain decodes a C-quoted filename', () => {
+    const parsed = parseBlameLinePorcelain(
+      [
+        '0123456789abcdef0123456789abcdef01234567 1 1 1',
+        'author Jane Doe',
+        'author-time 1780759591',
+        'author-tz +0800',
+        'summary unicode path',
+        'filename "src/caf\\303\\251.txt"',
+        '\tline',
+      ].join('\n'),
+    );
+    assert.strictEqual(parsed.filename, 'src/café.txt');
+  });
+
+  it('parseBlameLinePorcelain captures the filename at the blamed commit (rename case)', () => {
+    const parsed = parseBlameLinePorcelain(
+      [
+        '0123456789abcdef0123456789abcdef01234567 3 1 1',
+        'author Jane Doe',
+        'author-time 1780759591',
+        'author-tz +0800',
+        'summary Pre-rename change',
+        'filename old/path.txt',
+        '\tline text',
+      ].join('\n'),
+    );
+    // The line predates a rename: the path here is the file's *old* name, which
+    // is what callers must use to open `sha:<filename>`.
+    assert.strictEqual(parsed.filename, 'old/path.txt');
   });
 
   it('blameLine reports author and commit summary for a line at HEAD', async () => {

@@ -4,13 +4,21 @@ import { GitShowProvider, GITDIFF_SCHEME } from './gitShowProvider';
 import { ActiveDiffTracker } from './activeDiffTracker';
 import { DiffOpener } from './diffOpener';
 import { RefPicker } from './refPicker';
-import { decodeGitdiffUri } from './util/uri';
+import { decodeGitdiffUri, encodeGitdiffUri } from './util/uri';
 import { ChangedFilesProvider, ChangedFile, VIEW_ID } from './changedFilesProvider';
 import { BlameHoverProvider } from './blameHoverProvider';
+import { CurrentLineBlameController } from './currentLineBlame';
+import { OPEN_COMMIT_DIFF_COMMAND } from './blameFormat';
+
+/** git's well-known empty-tree object; used as the "left" when a commit has no parent. */
+const EMPTY_TREE_SHA = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
 
 export interface GitDiffExports {
   /** Internal — exposed only so integration tests can inspect filter state. */
   readonly changedFiles: ChangedFilesProvider;
+  /** Internal — exposed so integration tests can read the inline blame
+   *  annotation, which has no public read-back through the VS Code API. */
+  readonly lineBlame: CurrentLineBlameController;
 }
 
 export function activate(context: vscode.ExtensionContext): GitDiffExports {
@@ -18,6 +26,7 @@ export function activate(context: vscode.ExtensionContext): GitDiffExports {
   const provider = new GitShowProvider(git);
   const tracker = new ActiveDiffTracker();
   const blameHoverProvider = new BlameHoverProvider(git, tracker);
+  const lineBlame = new CurrentLineBlameController(git, tracker);
   const opener = new DiffOpener(git);
   const picker = new RefPicker(git);
   const changedFiles = new ChangedFilesProvider(
@@ -49,6 +58,29 @@ export function activate(context: vscode.ExtensionContext): GitDiffExports {
     ),
     tracker,
     blameHoverProvider,
+    lineBlame,
+    // Open a single file's diff for one commit (its state at the commit vs its
+    // parent), invoked from the `command:` link in blame hovers. Both sides are
+    // read-only gitdiff: documents; a root commit diffs against the empty tree.
+    vscode.commands.registerCommand(
+      OPEN_COMMIT_DIFF_COMMAND,
+      async (arg?: { repoRoot?: string; relPath?: string; sha?: string }) => {
+        if (!arg?.repoRoot || !arg.relPath || !arg.sha) return;
+        const { repoRoot, relPath, sha } = arg;
+        let parent: string | undefined;
+        try {
+          parent = await git.parentSha(repoRoot, sha);
+        } catch {
+          parent = undefined;
+        }
+        const left = encodeGitdiffUri({ ref: parent ?? EMPTY_TREE_SHA, repoRoot, relPath });
+        const right = encodeGitdiffUri({ ref: sha, repoRoot, relPath });
+        const title = `${relPath.split('/').pop() ?? relPath} @ ${sha.slice(0, 8)}`;
+        await vscode.commands.executeCommand('vscode.diff', left, right, title, {
+          preview: true,
+        });
+      },
+    ),
     vscode.commands.registerCommand('gitdiff.compareWithBranch', (uri?: vscode.Uri) =>
       runCompare('branch', uri, picker, opener, changedFiles),
     ),
@@ -131,7 +163,7 @@ export function activate(context: vscode.ExtensionContext): GitDiffExports {
     }
   })();
 
-  return { changedFiles };
+  return { changedFiles, lineBlame };
 }
 
 export async function deactivate(): Promise<void> {

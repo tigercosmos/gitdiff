@@ -37,7 +37,8 @@ GitDiff does exactly that — and unlike a read-only `git diff`, **the working-t
 - **Compare against any commit** — recent commits in a picker, plus a free-form "Enter SHA…" option.
 - **Editable right pane** — it's the real file on disk. Edit and save like any normal editor.
 - **Read-only left pane** — backed by `git show <ref>:<path>`, so you can't accidentally clobber history.
-- **Blame on hover** — hover any line in either pane to see the last commit that touched it (author, date, commit subject, short SHA). The right pane blames your live working-tree contents, so it stays accurate as you edit; uncommitted lines show a clean "Not committed yet".
+- **Current-line blame** — the line your cursor is on shows a dim end-of-line annotation (author, date, commit subject) in any file in a git repo and in GitDiff's diff panes. Toggle with `gitdiff.lineBlame.enabled`.
+- **Blame on hover** — hover a line to see the last commit that touched it (author, date, commit subject, short SHA), plus a link to **open that commit's diff for the file** in the editor and, when a remote is configured, links to **view the commit on the web** and its **pull/merge request** (resolved from the commit subject — no token or API call). The working-tree side blames your live contents, so it stays accurate as you edit; uncommitted lines show a clean "Not committed yet".
 - **Changed-Files sidebar** — pick a target once, see every file in your tree that differs from it, click to open the diff.
 - **Search + path filters in the sidebar** — narrow the changed-files list with a content search (match case / whole word / regex toggles, mirroring VS Code Search) plus comma-separated `files to include` / `files to exclude` glob inputs.
 - **Live branch tracking** — when comparing against a branch, "Refresh" re-resolves it to the current tip.
@@ -55,7 +56,7 @@ ext install tigercosmos.gitdiff
 **From a `.vsix`**
 
 ```bash
-code --install-extension gitdiff-0.4.0.vsix
+code --install-extension gitdiff-0.5.0.vsix
 ```
 
 ## Usage

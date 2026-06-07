@@ -38,10 +38,14 @@ async function hoverText(uri: vscode.Uri, line: number): Promise<string> {
 describe('gitdiff e2e', function () {
   this.timeout(30000);
 
+  // Captured from activate() so tests can read internals that have no public
+  // API (e.g. the inline-blame annotation).
+  let api: any;
+
   before(async () => {
     const ext = vscode.extensions.getExtension('tigercosmos.gitdiff');
     assert.ok(ext, 'extension not found');
-    await ext!.activate();
+    api = await ext!.activate();
   });
 
   beforeEach(async () => {
@@ -58,9 +62,140 @@ describe('gitdiff e2e', function () {
       'gitdiff.changedFiles.setTarget',
       'gitdiff.changedFiles.refresh',
       'gitdiff.changedFiles.openFile',
+      'gitdiff.openCommitDiffForFile',
     ]) {
       assert.ok(cmds.includes(id), `missing command ${id}`);
     }
+  });
+
+  describe('Inline current-line blame', () => {
+    // Poll the test seam instead of fixed sleeps — keeps it stable on slow
+    // (xvfb / Windows) CI runners.
+    async function waitFor(pred: () => boolean, ms = 6000): Promise<boolean> {
+      for (let w = 0; w <= ms; w += 100) {
+        if (pred()) return true;
+        await settle(100);
+      }
+      return pred();
+    }
+
+    it('annotates the cursor line of a working-tree file with author, date, subject', async () => {
+      const root = makeRepo();
+      const fp = path.join(root, 'inline.js');
+      fs.writeFileSync(fp, 'const a = 1;\nconst b = 2;\nconst c = 3;\n');
+      commit(root, 'Seed inline blame (#7)');
+
+      const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(fp));
+      const editor = await vscode.window.showTextDocument(doc);
+      editor.selection = new vscode.Selection(new vscode.Position(1, 0), new vscode.Position(1, 0));
+
+      await waitFor(() => {
+        const a = api.lineBlame.getRenderedAnnotation();
+        return !!a && a.line === 1;
+      });
+      const ann = api.lineBlame.getRenderedAnnotation();
+      assert.ok(ann, 'expected an inline annotation on the cursor line');
+      assert.strictEqual(ann.line, 1);
+      assert.strictEqual(ann.uri, doc.uri.toString());
+      assert.ok(ann.text.includes('Test'), `author missing: ${ann.text}`);
+      assert.ok(ann.text.includes('Seed inline blame (#7)'), `subject missing: ${ann.text}`);
+      assert.match(ann.text, /\d{4}-\d{2}-\d{2}/);
+    });
+
+    it('follows the cursor and reflects the per-line commit', async () => {
+      const root = makeRepo();
+      const fp = path.join(root, 'multi.js');
+      fs.writeFileSync(fp, 'line0\nline1\nline2\nline3\n');
+      commit(root, 'first');
+      fs.appendFileSync(fp, 'line4 added later\n');
+      commit(root, 'second commit adds a line');
+
+      const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(fp));
+      const editor = await vscode.window.showTextDocument(doc);
+
+      editor.selection = new vscode.Selection(new vscode.Position(0, 0), new vscode.Position(0, 0));
+      await waitFor(() => {
+        const a = api.lineBlame.getRenderedAnnotation();
+        return !!a && a.line === 0 && a.text.includes('first');
+      });
+      assert.ok(
+        api.lineBlame.getRenderedAnnotation().text.includes('first'),
+        'line 0 should blame the first commit',
+      );
+
+      editor.selection = new vscode.Selection(new vscode.Position(4, 0), new vscode.Position(4, 0));
+      await waitFor(() => {
+        const a = api.lineBlame.getRenderedAnnotation();
+        return !!a && a.line === 4 && a.text.includes('second commit adds a line');
+      });
+      const ann = api.lineBlame.getRenderedAnnotation();
+      assert.strictEqual(ann.line, 4);
+      assert.ok(ann.text.includes('second commit adds a line'), `line 4 subject: ${ann.text}`);
+    });
+
+    it('is suppressed while gitdiff.lineBlame.enabled is false, and returns when re-enabled', async () => {
+      const root = makeRepo();
+      const fp = path.join(root, 'toggle.js');
+      fs.writeFileSync(fp, 'alpha\nbeta\n');
+      commit(root, 'init');
+
+      const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(fp));
+      const editor = await vscode.window.showTextDocument(doc);
+      editor.selection = new vscode.Selection(new vscode.Position(0, 0), new vscode.Position(0, 0));
+      await waitFor(() => !!api.lineBlame.getRenderedAnnotation());
+      assert.ok(api.lineBlame.getRenderedAnnotation(), 'annotation expected while enabled');
+
+      try {
+        await vscode.workspace
+          .getConfiguration('gitdiff')
+          .update('lineBlame.enabled', false, vscode.ConfigurationTarget.Global);
+        await waitFor(() => api.lineBlame.getRenderedAnnotation() === undefined);
+        assert.strictEqual(
+          api.lineBlame.getRenderedAnnotation(),
+          undefined,
+          'annotation must clear when the feature is disabled',
+        );
+      } finally {
+        await vscode.workspace
+          .getConfiguration('gitdiff')
+          .update('lineBlame.enabled', undefined, vscode.ConfigurationTarget.Global);
+      }
+
+      editor.selection = new vscode.Selection(new vscode.Position(1, 0), new vscode.Position(1, 0));
+      await waitFor(() => !!api.lineBlame.getRenderedAnnotation());
+      assert.ok(api.lineBlame.getRenderedAnnotation(), 'annotation expected after re-enable');
+    });
+
+    it('annotates the ref-pinned gitdiff pane as well', async () => {
+      const root = makeRepo();
+      const fp = path.join(root, 'pane.txt');
+      fs.writeFileSync(fp, 'pinned content\n');
+      commit(root, 'pane commit subject');
+      fs.writeFileSync(fp, 'pinned content changed\n');
+
+      const fileUri = vscode.Uri.file(fp);
+      await vscode.window.showTextDocument(fileUri);
+      await withQuickPickPicking(
+        (i) => typeof i.label === 'string' && i.label.includes('main'),
+        () => vscode.commands.executeCommand('gitdiff.compareWithBranch', fileUri),
+      );
+      await settle();
+      const tab = vscode.window.tabGroups.activeTabGroup.activeTab!;
+      assert.ok(tab.input instanceof vscode.TabInputTextDiff);
+      const left = (tab.input as vscode.TabInputTextDiff).original;
+
+      const leftDoc = await vscode.workspace.openTextDocument(left);
+      const leftEditor = await vscode.window.showTextDocument(leftDoc, { preview: false });
+      leftEditor.selection = new vscode.Selection(new vscode.Position(0, 0), new vscode.Position(0, 0));
+      await waitFor(() => {
+        const a = api.lineBlame.getRenderedAnnotation();
+        return !!a && a.uri === left.toString();
+      });
+      const ann = api.lineBlame.getRenderedAnnotation();
+      assert.ok(ann, 'expected an inline annotation in the gitdiff pane');
+      assert.strictEqual(ann.uri, left.toString());
+      assert.ok(ann.text.includes('pane commit subject'), `subject: ${ann.text}`);
+    });
   });
 
   describe('Compare with Branch', () => {
@@ -242,6 +377,187 @@ describe('gitdiff e2e', function () {
       const text = await hoverText(vscode.Uri.file(filePath), 0);
       assert.ok(!text.includes('Author:'), text);
       assert.ok(!text.includes('Commit:'), text);
+    });
+  });
+
+  describe('Commit blame links & open-commit-diff', () => {
+    async function openMainDiff(root: string, filePath: string): Promise<vscode.TabInputTextDiff> {
+      const fileUri = vscode.Uri.file(filePath);
+      await vscode.window.showTextDocument(fileUri);
+      await withQuickPickPicking(
+        (i) => typeof i.label === 'string' && i.label.includes('main'),
+        () => vscode.commands.executeCommand('gitdiff.compareWithBranch', fileUri),
+      );
+      await settle();
+      const tab = vscode.window.tabGroups.activeTabGroup.activeTab!;
+      assert.ok(tab.input instanceof vscode.TabInputTextDiff);
+      return tab.input as vscode.TabInputTextDiff;
+    }
+
+    it('hover adds commit/PR web links and an open-commit-diff command when a remote is set', async () => {
+      const root = makeRepo();
+      git(root, ['remote', 'add', 'origin', 'https://github.com/owner/repo.git']);
+      const filePath = path.join(root, 'a.txt');
+      fs.writeFileSync(filePath, 'line one\n');
+      commit(root, 'Add the thing (#42)');
+      fs.writeFileSync(filePath, 'line one changed\n');
+
+      const input = await openMainDiff(root, filePath);
+      const leftHover = await hoverText(input.original, 0);
+      assert.ok(
+        leftHover.includes('https://github.com/owner/repo/commit/'),
+        `expected commit web link, got: ${leftHover}`,
+      );
+      assert.ok(
+        leftHover.includes('https://github.com/owner/repo/pull/42'),
+        `expected PR link, got: ${leftHover}`,
+      );
+      assert.ok(leftHover.includes('Open commit diff'), leftHover);
+      assert.ok(leftHover.includes('command:gitdiff.openCommitDiffForFile'), leftHover);
+    });
+
+    it('hover offers open-commit-diff but no web links when the repo has no remote', async () => {
+      const root = makeRepo();
+      const filePath = path.join(root, 'a.txt');
+      fs.writeFileSync(filePath, 'x\n');
+      commit(root, 'init');
+      fs.writeFileSync(filePath, 'y\n');
+
+      const input = await openMainDiff(root, filePath);
+      const leftHover = await hoverText(input.original, 0);
+      assert.ok(leftHover.includes('Open commit diff'), leftHover);
+      assert.ok(!leftHover.includes('/commit/'), `unexpected web commit link: ${leftHover}`);
+      assert.ok(!/\/pull\//.test(leftHover), `unexpected PR link: ${leftHover}`);
+    });
+
+    it('the hover command URI round-trips: parsing + invoking it opens the diff', async () => {
+      const root = makeRepo();
+      const filePath = path.join(root, 'a.txt');
+      fs.writeFileSync(filePath, 'v1\n');
+      commit(root, 'v1');
+      fs.writeFileSync(filePath, 'v2\n');
+      commit(root, 'v2');
+      fs.writeFileSync(filePath, 'v3-WT\n');
+
+      const input = await openMainDiff(root, filePath);
+      const leftHover = await hoverText(input.original, 0);
+      // Extract the command URI exactly as VS Code's markdown renderer would.
+      const m = /command:gitdiff\.openCommitDiffForFile\?([^)\s]+)/.exec(leftHover);
+      assert.ok(m, `expected a command URI in hover: ${leftHover}`);
+      const parsed = JSON.parse(decodeURIComponent(m![1]));
+      // Must be a positional-arg array, per the VS Code command-URI contract.
+      assert.ok(Array.isArray(parsed), `command args must be an array, got ${m![1]}`);
+
+      await closeAllTabs();
+      await vscode.commands.executeCommand('gitdiff.openCommitDiffForFile', ...parsed);
+      await settle();
+
+      const tab = vscode.window.tabGroups.activeTabGroup.activeTab!;
+      assert.ok(tab.input instanceof vscode.TabInputTextDiff, 'expected diff from command URI');
+      assert.match(tab.label, /a\.txt @ [0-9a-f]{8}/);
+    });
+
+    it('open-commit-diff uses the pre-rename path so a renamed file diffs correctly', async () => {
+      const root = makeRepo();
+      fs.writeFileSync(path.join(root, 'old.txt'), 'a\nb\n');
+      commit(root, 'add old.txt');
+      git(root, ['mv', 'old.txt', 'new.txt']);
+      fs.writeFileSync(path.join(root, 'new.txt'), 'a\nb\nc\n');
+      commit(root, 'rename old.txt to new.txt');
+      fs.writeFileSync(path.join(root, 'new.txt'), 'a\nb\nc\nWT\n');
+
+      const input = await openMainDiff(root, path.join(root, 'new.txt'));
+      // Line 0 ("a") was last touched in the pre-rename commit, where the file
+      // was still old.txt — blame must follow the rename.
+      const hv = await hoverText(input.original, 0);
+      const m = /command:gitdiff\.openCommitDiffForFile\?([^)\s]+)/.exec(hv);
+      assert.ok(m, `expected command URI: ${hv}`);
+      const parsed = JSON.parse(decodeURIComponent(m![1]));
+      assert.strictEqual(
+        parsed[0].relPath,
+        'old.txt',
+        `command must target the pre-rename path, got ${parsed[0].relPath}`,
+      );
+
+      await closeAllTabs();
+      await vscode.commands.executeCommand('gitdiff.openCommitDiffForFile', ...parsed);
+      await settle();
+      const tab = vscode.window.tabGroups.activeTabGroup.activeTab!;
+      assert.ok(tab.input instanceof vscode.TabInputTextDiff, 'expected a diff tab');
+      const right = await vscode.workspace.openTextDocument(
+        (tab.input as vscode.TabInputTextDiff).modified,
+      );
+      // The diff is the real content at the blamed commit, not empty.
+      assert.ok(right.getText().includes('a'), `expected old.txt content, got: ${right.getText()}`);
+      assert.ok(right.getText().length > 0, 'diff must not be empty for a renamed file');
+    });
+
+    it('opens a parent-vs-commit diff for a single file', async () => {
+      const root = makeRepo();
+      const filePath = path.join(root, 'a.txt');
+      fs.writeFileSync(filePath, 'v1\n');
+      commit(root, 'v1');
+      fs.writeFileSync(filePath, 'v2\n');
+      commit(root, 'v2');
+      const sha2 = git(root, ['rev-parse', 'HEAD']).trim();
+      const sha1 = git(root, ['rev-parse', 'HEAD~1']).trim();
+
+      await vscode.commands.executeCommand('gitdiff.openCommitDiffForFile', {
+        repoRoot: realRepoPath(root),
+        relPath: 'a.txt',
+        sha: sha2,
+      });
+      await settle();
+
+      const tab = vscode.window.tabGroups.activeTabGroup.activeTab!;
+      assert.ok(tab.input instanceof vscode.TabInputTextDiff, 'expected a diff tab');
+      const input = tab.input as vscode.TabInputTextDiff;
+      assert.strictEqual(input.original.scheme, 'gitdiff');
+      assert.strictEqual(input.modified.scheme, 'gitdiff');
+      assert.strictEqual(new URLSearchParams(input.original.query).get('ref'), sha1);
+      assert.strictEqual(new URLSearchParams(input.modified.query).get('ref'), sha2);
+
+      const left = await vscode.workspace.openTextDocument(input.original);
+      const right = await vscode.workspace.openTextDocument(input.modified);
+      assert.strictEqual(left.getText(), 'v1\n');
+      assert.strictEqual(right.getText(), 'v2\n');
+      assert.match(tab.label, /a\.txt @ [0-9a-f]{8}/);
+    });
+
+    it('diffs a root commit against the empty tree (empty left side)', async () => {
+      const root = makeRepo();
+      const filePath = path.join(root, 'a.txt');
+      fs.writeFileSync(filePath, 'first\n');
+      commit(root, 'root');
+      const sha = git(root, ['rev-parse', 'HEAD']).trim();
+
+      await vscode.commands.executeCommand('gitdiff.openCommitDiffForFile', {
+        repoRoot: realRepoPath(root),
+        relPath: 'a.txt',
+        sha,
+      });
+      await settle();
+
+      const input = vscode.window.tabGroups.activeTabGroup.activeTab!
+        .input as vscode.TabInputTextDiff;
+      const left = await vscode.workspace.openTextDocument(input.original);
+      const right = await vscode.workspace.openTextDocument(input.modified);
+      assert.strictEqual(left.getText(), '');
+      assert.strictEqual(right.getText(), 'first\n');
+    });
+
+    it('ignores malformed open-commit-diff args without opening a diff', async () => {
+      await vscode.commands.executeCommand('gitdiff.openCommitDiffForFile', {
+        repoRoot: '',
+        relPath: '',
+        sha: '',
+      });
+      await settle();
+      const active = vscode.window.tabGroups.activeTabGroup.activeTab;
+      assert.ok(
+        !(active?.input instanceof vscode.TabInputTextDiff),
+        'expected no diff for malformed args',
+      );
     });
   });
 
@@ -1257,6 +1573,7 @@ describe('gitdiff e2e', function () {
         'gitdiff.changedFiles.setTarget',
         'gitdiff.changedFiles.refresh',
         'gitdiff.changedFiles.openFile',
+        'gitdiff.openCommitDiffForFile',
       ];
       for (const id of expected) {
         assert.ok(cmds.includes(id), `missing command ${id}`);
