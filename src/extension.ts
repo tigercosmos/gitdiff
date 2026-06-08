@@ -45,10 +45,14 @@ export function activate(context: vscode.ExtensionContext): GitDiffExports {
   context.subscriptions.push(
     changedFiles,
     changedFiles.onDidChangeTarget(syncHasTargetContext),
+    // Highlight the row in the Changed Files view for whatever diff is focused.
+    tracker.onDidChangeActiveFile((file) => changedFiles.setActiveFile(file)),
     vscode.window.registerWebviewViewProvider(VIEW_ID, changedFiles, {
       webviewOptions: { retainContextWhenHidden: true },
     }),
   );
+  // Seed the highlight for a diff already focused at activation time.
+  changedFiles.setActiveFile(tracker.getActiveFile());
 
   context.subscriptions.push(
     vscode.workspace.registerTextDocumentContentProvider(GITDIFF_SCHEME, provider),

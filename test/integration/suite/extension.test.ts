@@ -1233,6 +1233,41 @@ describe('gitdiff e2e', function () {
     });
   });
 
+  describe('Active-file highlight in Changed Files view', () => {
+    it('tracks the relPath of the focused gitdiff diff and clears on a non-diff editor', async () => {
+      const root = makeRepo();
+      const aPath = path.join(root, 'a.txt');
+      const bPath = path.join(root, 'b.txt');
+      fs.writeFileSync(aPath, 'a\n');
+      fs.writeFileSync(bPath, 'b\n');
+      commit(root, 'init');
+      fs.writeFileSync(aPath, 'a-WT\n');
+      fs.writeFileSync(bPath, 'b-WT\n');
+
+      // Open a diff for a.txt vs main — also sets the sidebar target/repo.
+      await withQuickPickPicking(
+        (i) => typeof i.label === 'string' && i.label.includes('main'),
+        () => vscode.commands.executeCommand('gitdiff.compareWithBranch', vscode.Uri.file(aPath)),
+      );
+      await settle();
+      assert.strictEqual(api.changedFiles.getActiveRelPath(), 'a.txt');
+
+      // Open b.txt's diff from the sidebar; the highlight follows focus.
+      await vscode.commands.executeCommand('gitdiff.changedFiles.openFile', {
+        relPath: 'b.txt',
+        absPath: bPath,
+        status: 'M',
+      });
+      await settle();
+      assert.strictEqual(api.changedFiles.getActiveRelPath(), 'b.txt');
+
+      // Focus a plain text editor — no gitdiff diff active, highlight clears.
+      await vscode.window.showTextDocument(vscode.Uri.file(aPath));
+      await settle();
+      assert.strictEqual(api.changedFiles.getActiveRelPath(), undefined);
+    });
+  });
+
   describe('Non-UTF-8 handling', () => {
     it('aborts initial open with a warning when file at ref is non-UTF-8', async () => {
       const root = makeRepo();

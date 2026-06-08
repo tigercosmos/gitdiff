@@ -54,6 +54,8 @@ interface FilesMessage {
   targetLabel: string;
   loading?: boolean;
   searchError?: string;
+  /** relPath of the file shown by the active gitdiff diff, if any. */
+  activeRelPath?: string;
 }
 
 interface InitMessage {
@@ -61,7 +63,13 @@ interface InitMessage {
   filter: FilterState;
 }
 
-type OutgoingMessage = FilesMessage | InitMessage;
+/** Lightweight update of just the highlighted row, no list rebuild. */
+interface ActiveFileMessage {
+  type: 'activeFile';
+  relPath?: string;
+}
+
+type OutgoingMessage = FilesMessage | InitMessage | ActiveFileMessage;
 
 export const VIEW_ID = 'gitdiff.changedFiles';
 
@@ -93,6 +101,13 @@ export class ChangedFilesProvider implements vscode.WebviewViewProvider, vscode.
   private listSeq = 0;
   private filterSeq = 0;
   private viewSubs: vscode.Disposable[] = [];
+  /**
+   * The file shown by the active gitdiff diff, or undefined when no gitdiff
+   * diff is focused. Stored raw (not yet matched against the target's repo) so
+   * the highlight is recomputed live — the diff may become active before the
+   * target is set, and the target can change while a diff stays focused.
+   */
+  private activeFile: { repoRoot: string; relPath: string } | undefined;
 
   constructor(
     private readonly git: GitService,
@@ -163,6 +178,32 @@ export class ChangedFilesProvider implements vscode.WebviewViewProvider, vscode.
 
   getFilter(): FilterState {
     return { ...this.filter };
+  }
+
+  /**
+   * Record the file the active gitdiff diff is showing. Pass `undefined` to
+   * clear. The highlight is only applied when the diff's repo matches the
+   * current target (see `effectiveActiveRelPath`), so an unrelated repo's diff
+   * can't light up a same-named row here.
+   */
+  setActiveFile(file: { repoRoot: string; relPath: string } | undefined): void {
+    const prev = this.effectiveActiveRelPath();
+    this.activeFile = file ? { repoRoot: file.repoRoot, relPath: file.relPath } : undefined;
+    const next = this.effectiveActiveRelPath();
+    if (next === prev) return;
+    this.post({ type: 'activeFile', relPath: next });
+  }
+
+  /** The currently highlighted row's relPath, or undefined. Exposed for tests. */
+  getActiveRelPath(): string | undefined {
+    return this.effectiveActiveRelPath();
+  }
+
+  /** Active file's relPath only when it belongs to the current target's repo. */
+  private effectiveActiveRelPath(): string | undefined {
+    return this.activeFile && this.activeFile.repoRoot === this.target?.repoRoot
+      ? this.activeFile.relPath
+      : undefined;
   }
 
   async setTarget(picked: PickedRef, repoRoot: string): Promise<void> {
@@ -330,7 +371,15 @@ export class ChangedFilesProvider implements vscode.WebviewViewProvider, vscode.
 
   private post(msg: OutgoingMessage): void {
     if (!this.view) return;
-    void this.view.webview.postMessage(msg);
+    // Carry the active-file highlight on every list post so it survives
+    // rebuilds (refresh/filter) — and so a target change re-evaluates which
+    // row (if any) matches — without a separate round-trip.
+    const active = this.effectiveActiveRelPath();
+    const out: OutgoingMessage =
+      msg.type === 'files' && active !== undefined
+        ? { ...msg, activeRelPath: active }
+        : msg;
+    void this.view.webview.postMessage(out);
   }
 }
 
@@ -609,6 +658,12 @@ body {
 #files-list li:hover { background: var(--vscode-list-hoverBackground); }
 #files-list li:focus { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; background: var(--vscode-list-focusBackground); }
 #files-list li.selected { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
+/* Row whose diff is the active editor: a left accent + tinted background so
+   it reads as "currently open" without mimicking keyboard selection. */
+#files-list li.active-file {
+  background: var(--vscode-list-inactiveSelectionBackground);
+  box-shadow: inset 2px 0 0 0 var(--vscode-focusBorder);
+}
 .status {
   width: 12px;
   text-align: center;
@@ -695,6 +750,12 @@ body {
   const vscode = acquireVsCodeApi();
   const $ = (id) => document.getElementById(id);
   const persisted = vscode.getState() || {};
+  // relPath of the file whose diff is the active editor, or null. Tracked
+  // separately from the file list so it re-applies across list rebuilds.
+  let activeRelPath = null;
+  // relPath we've already scrolled into view, so a re-render for an unrelated
+  // reason (filter edit) doesn't yank the viewport back to the active row.
+  let scrolledRelPath = null;
 
   function readFilter() {
     return {
@@ -814,6 +875,28 @@ body {
     return i === -1 ? '' : p.slice(0, i);
   }
 
+  // Toggle the .active-file class on the row matching activeRelPath, and
+  // scroll that row into view once per active file — when it first becomes
+  // active OR when its row first appears in a later render (e.g. the active
+  // diff was known before the list finished loading). scrolledRelPath guards
+  // against re-scrolling on unrelated re-renders such as filter edits.
+  function applyActiveHighlight() {
+    const rows = $('files-list').children;
+    let matched = null;
+    for (let i = 0; i < rows.length; i++) {
+      const li = rows[i];
+      const on = activeRelPath != null && li.getAttribute('data-rel') === activeRelPath;
+      li.classList.toggle('active-file', on);
+      if (on) matched = li;
+    }
+    if (matched && scrolledRelPath !== activeRelPath) {
+      matched.scrollIntoView({ block: 'nearest' });
+      scrolledRelPath = activeRelPath;
+    } else if (activeRelPath == null) {
+      scrolledRelPath = null;
+    }
+  }
+
   function render(payload) {
     const hasTarget = !!payload.hasTarget;
     const loading = !!payload.loading;
@@ -875,6 +958,7 @@ body {
       frag.appendChild(li);
     }
     list.appendChild(frag);
+    applyActiveHighlight();
   }
 
   window.addEventListener('message', (event) => {
@@ -886,7 +970,11 @@ body {
         vscode.setState({ filter: m.filter });
       }
     } else if (m.type === 'files') {
+      activeRelPath = m.activeRelPath != null ? m.activeRelPath : null;
       render(m);
+    } else if (m.type === 'activeFile') {
+      activeRelPath = m.relPath != null ? m.relPath : null;
+      applyActiveHighlight();
     }
   });
 
