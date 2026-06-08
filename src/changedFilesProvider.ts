@@ -13,6 +13,8 @@ export interface ChangedFile {
   relPath: string;
   absPath: string;
   status: ChangeStatus;
+  /** For a rename (`R`), the file's path at the comparison target. */
+  origPath?: string;
 }
 
 export interface FilterState {
@@ -274,6 +276,14 @@ export class ChangedFilesProvider implements vscode.WebviewViewProvider, vscode.
         const file = this.files.find((f) => f.relPath === m.relPath);
         if (file) {
           await vscode.commands.executeCommand('gitdiff.changedFiles.openFile', file);
+        }
+        break;
+      }
+      case 'revertFile': {
+        if (!m.relPath) return;
+        const file = this.files.find((f) => f.relPath === m.relPath);
+        if (file) {
+          await vscode.commands.executeCommand('gitdiff.changedFiles.revertFile', file);
         }
         break;
       }
@@ -613,6 +623,27 @@ body {
 .status.Q { color: var(--vscode-gitDecoration-untrackedResourceForeground); }
 .name { overflow: hidden; text-overflow: ellipsis; }
 .dir { opacity: 0.55; font-size: 11px; overflow: hidden; text-overflow: ellipsis; }
+.revert-btn {
+  appearance: none;
+  background: transparent;
+  color: inherit;
+  border: 0;
+  cursor: pointer;
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 0 4px;
+  border-radius: 3px;
+  font: inherit;
+  line-height: 1;
+  /* Hidden until the row is hovered/focused, matching VSCode SCM inline
+     actions — revert is destructive, so it shouldn't invite a stray click. */
+  opacity: 0;
+}
+.revert-btn:hover { background: var(--vscode-toolbar-hoverBackground); }
+#files-list li:hover .revert-btn,
+#files-list li:focus .revert-btn,
+#files-list li:focus-within .revert-btn,
+.revert-btn:focus { opacity: 0.9; }
 .empty, .loading {
   padding: 8px 4px;
   opacity: 0.6;
@@ -732,9 +763,21 @@ body {
   function activateRow(li) {
     vscode.postMessage({ type: 'openFile', relPath: li.getAttribute('data-rel') });
   }
+  function revertRow(li) {
+    vscode.postMessage({ type: 'revertFile', relPath: li.getAttribute('data-rel') });
+  }
   $('files-list').addEventListener('click', (event) => {
     const target = event.target;
-    const li = target && target.closest ? target.closest('li[data-rel]') : null;
+    if (!target || !target.closest) return;
+    // Revert button takes precedence — it sits inside the row, so without
+    // this guard the click would bubble up and open the diff instead.
+    const rb = target.closest('.revert-btn');
+    if (rb) {
+      const rli = rb.closest('li[data-rel]');
+      if (rli) revertRow(rli);
+      return;
+    }
+    const li = target.closest('li[data-rel]');
     if (!li) return;
     activateRow(li);
   });
@@ -743,6 +786,10 @@ body {
   // rows so a screen-reader / keyboard user can walk the list.
   $('files-list').addEventListener('keydown', (event) => {
     const target = event.target;
+    // Keys pressed while the revert button is focused are its own concern:
+    // Enter/Space fire a native click (handled above), and we don't want
+    // arrow-nav or row activation to steal them.
+    if (target && target.closest && target.closest('.revert-btn')) return;
     const li = target && target.closest ? target.closest('li[data-rel]') : null;
     if (!li) return;
     if (event.key === 'Enter' || event.key === ' ') {
@@ -812,9 +859,19 @@ body {
       const dr = document.createElement('span');
       dr.className = 'dir';
       dr.textContent = dirname(f.relPath);
+      const rb = document.createElement('button');
+      rb.className = 'revert-btn';
+      rb.type = 'button';
+      const revertLabel = payload.targetLabel
+        ? 'Revert to ' + payload.targetLabel
+        : 'Revert to target';
+      rb.title = revertLabel;
+      rb.setAttribute('aria-label', revertLabel + ': ' + f.relPath);
+      rb.textContent = '↺';
       li.appendChild(s);
       li.appendChild(nm);
       if (dr.textContent) li.appendChild(dr);
+      li.appendChild(rb);
       frag.appendChild(li);
     }
     list.appendChild(frag);

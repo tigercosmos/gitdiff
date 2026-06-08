@@ -40,6 +40,7 @@ GitDiff does exactly that — and unlike a read-only `git diff`, **the working-t
 - **Current-line blame** — the line your cursor is on shows a dim end-of-line annotation (author, date, commit subject) in any file in a git repo and in GitDiff's diff panes. Toggle with `gitdiff.lineBlame.enabled`.
 - **Blame on hover** — hover a line to see the last commit that touched it (author, date, commit subject, short SHA), plus a link to **open that commit's diff for the file** in the editor and, when a remote is configured, links to **view the commit on the web** and its **pull/merge request** (resolved from the commit subject — no token or API call). The working-tree side blames your live contents, so it stays accurate as you edit; uncommitted lines show a clean "Not committed yet".
 - **Changed-Files sidebar** — pick a target once, see every file in your tree that differs from it, click to open the diff.
+- **Revert a file to the target** — hover a row in the sidebar and click the **↺** button (aligned right) to discard that file's working-tree changes and restore it to its state at the comparison branch/commit. Working-tree additions are removed; files deleted from your tree are recreated. A confirmation prompt guards the discard.
 - **Search + path filters in the sidebar** — narrow the changed-files list with a content search (match case / whole word / regex toggles, mirroring VS Code Search) plus comma-separated `files to include` / `files to exclude` glob inputs.
 - **Live branch tracking** — when comparing against a branch, "Refresh" re-resolves it to the current tip.
 - **Repo-aware** — works correctly with multi-root workspaces, nested repos, and reserved characters in branch names.
@@ -56,7 +57,7 @@ ext install tigercosmos.gitdiff
 **From a `.vsix`**
 
 ```bash
-code --install-extension gitdiff-0.5.0.vsix
+code --install-extension gitdiff-0.6.0.vsix
 ```
 
 ## Usage
@@ -79,7 +80,8 @@ Hover over any line in the diff to see the last commit that touched it — autho
 2. Hit **Set Comparison Target…** in the view's title.
 3. Click any file in the list to open its diff against your chosen target.
 4. Narrow the list with the **Search** box (toggle match-case / whole-word / regex on the right) and the **files to include** / **files to exclude** glob inputs — same comma-separated syntax as VS Code's Search panel (`*.ts`, `src/`, `**/*.test.ts`, `*.{ts,tsx}`). Filter state is remembered per workspace.
-5. Use the **Clear Comparison Target** button (`$(clear-all)`) in the view's title to drop the target and close every open GitDiff diff in one click.
+5. Hover a row and click the **↺ Revert** button on the right to discard that file's changes and restore it to the target (a confirmation prompt guards the discard).
+6. Use the **Clear Comparison Target** button (`$(clear-all)`) in the view's title to drop the target and close every open GitDiff diff in one click.
 
 ### Editor title actions
 
@@ -100,6 +102,7 @@ When a GitDiff diff is the active editor:
 | Change Target… | `gitdiff.changeTarget` |
 | Set Comparison Target… (sidebar) | `gitdiff.changedFiles.setTarget` |
 | Refresh Changed Files (sidebar) | `gitdiff.changedFiles.refresh` |
+| Revert File to Comparison Target (sidebar) | `gitdiff.changedFiles.revertFile` |
 | Clear Comparison Target (sidebar) | `gitdiff.changedFiles.clearTarget` |
 
 ## Configuration

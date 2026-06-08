@@ -10,20 +10,33 @@ import { classifyBlob, BlobKind } from './util/encoding';
  */
 export function parseNameStatusZ(
   text: string,
-): Array<{ relPath: string; status: 'M' | 'A' | 'D' | 'R' | 'C' | 'T' | 'U' }> {
+): Array<{ relPath: string; status: 'M' | 'A' | 'D' | 'R' | 'C' | 'T' | 'U'; origPath?: string }> {
   if (!text) return [];
   const parts = text.split('\0');
   if (parts.length > 0 && parts[parts.length - 1] === '') parts.pop();
-  const out: Array<{ relPath: string; status: 'M' | 'A' | 'D' | 'R' | 'C' | 'T' | 'U' }> = [];
+  const out: Array<{
+    relPath: string;
+    status: 'M' | 'A' | 'D' | 'R' | 'C' | 'T' | 'U';
+    origPath?: string;
+  }> = [];
   let i = 0;
   while (i < parts.length) {
     const code = parts[i++] ?? '';
     if (!code) continue;
     const head = code.charAt(0).toUpperCase();
     if (head === 'R' || head === 'C') {
-      i++; // skip the old path
+      // Format: R<score>NUL<old>NUL<new>. Keep the new path as `relPath` but
+      // retain the old path as `origPath` — a revert of a rename must restore
+      // the old name, which is otherwise lost.
+      const orig = parts[i++];
       const next = parts[i++];
-      if (next != null) out.push({ relPath: next, status: head as 'R' | 'C' });
+      if (next != null) {
+        out.push({
+          relPath: next,
+          status: head as 'R' | 'C',
+          ...(orig ? { origPath: orig } : {}),
+        });
+      }
     } else {
       const file = parts[i++];
       if (file != null) {
@@ -118,6 +131,27 @@ export function unquoteGitPath(raw: string): string {
     }
   }
   return Buffer.from(bytes).toString('utf8');
+}
+
+/**
+ * True iff both paths are the same filesystem entry (same device + inode).
+ * Used to detect a case-only rename collision on case-insensitive filesystems,
+ * where two differently-cased names share one inode. Uses `lstatSync`, NOT
+ * `statSync`: for a renamed *symlink* whose old and new names point at the same
+ * target, following the links would report the target's inode for both and
+ * wrongly call them the same entry — leaving the new link behind. lstat
+ * compares the link entries themselves. A missing side (or any error) is
+ * treated as "not the same". (For a genuine case-only collision the two names
+ * are one directory entry, so they share an inode under lstat too.)
+ */
+function isSameFsEntry(a: string, b: string): boolean {
+  try {
+    const sa = fs.lstatSync(a);
+    const sb = fs.lstatSync(b);
+    return sa.dev === sb.dev && sa.ino === sb.ino;
+  } catch {
+    return false;
+  }
 }
 
 export function parseBlameLinePorcelain(text: string): BlameInfo | undefined {
@@ -449,11 +483,21 @@ export class GitService {
    * "path not present" (false) from other failures (which throw). Uses
    * `git ls-tree` so the empty tree at the ref doesn't get confused with
    * an invalid ref.
+   *
+   * The pathspec carries the `:(literal)` magic prefix so a path containing
+   * fnmatch metacharacters (`*`, `?`, `[…]`) is matched verbatim. This keeps
+   * the existence check in lock-step with the literal-pathspec `checkout`/`rm`
+   * in `revertFileToRef`: `git checkout` DOES glob its pathspec while
+   * `ls-tree`'s matching is more literal, so without this the gate and the
+   * action it guards could disagree about which file(s) are involved — a
+   * destructive mismatch for revert. (`:(literal)` is a no-op for ordinary
+   * paths; the `--name-only` output is still the plain path, so the exact
+   * `entries.includes(relPath)` comparison below is unaffected.)
    */
   async pathExistsAtRef(repoRoot: string, sha: string, relPath: string): Promise<boolean> {
     const r = await execGit(
       this.gitPath(),
-      ['ls-tree', '--name-only', '-z', '--end-of-options', sha, '--', relPath],
+      ['ls-tree', '--name-only', '-z', '--end-of-options', sha, '--', `:(literal)${relPath}`],
       repoRoot,
       { allowNonZero: true },
     );
@@ -480,7 +524,17 @@ export class GitService {
   async listChangedPaths(
     repoRoot: string,
     ref: string,
-  ): Promise<Array<{ relPath: string; status: 'M' | 'A' | 'D' | 'R' | 'C' | 'T' | 'U' }>> {
+  ): Promise<
+    Array<{ relPath: string; status: 'M' | 'A' | 'D' | 'R' | 'C' | 'T' | 'U'; origPath?: string }>
+  > {
+    // Rename detection follows the user's `diff.renames` config (git's default
+    // is on). When a rename is detected it arrives as a single `R` row carrying
+    // `origPath`, which revert uses to restore the old name; when it is off the
+    // same rename surfaces as separate A+D rows that each revert correctly. We
+    // deliberately do NOT force `-M`: a rename `R` row makes the diff opener and
+    // the blame providers (which derive the editable side's path from the diff's
+    // left `gitdiff:` URI) assume the left and right share one repo path, and
+    // pinning detection on regardless of config widened that coupling.
     const r = await execGit(
       this.gitPath(),
       ['diff', '--name-status', '-z', '--end-of-options', ref],
@@ -539,6 +593,88 @@ export class GitService {
     }
     flush();
     return out;
+  }
+
+  /**
+   * Make `relPath` in the working tree match its state at `ref`:
+   *  - present at `ref` → restore its content with `git checkout`, which
+   *    overwrites both the working tree and the index entry.
+   *  - absent at `ref` (a working-tree/staged addition) → drop any staged
+   *    entry and delete the file from disk, so the result matches `ref`.
+   * `ref` should already be verified; `-`-prefixed input is rejected up front
+   * to prevent ref-as-option injection.
+   *
+   * `renameFrom` is the file's path *at the target* when this row is a rename
+   * (the sidebar keeps only the new path for an `R` entry). Restoring the
+   * target state then means bringing back the old name as well as removing the
+   * new one — otherwise the revert leaves the old path deleted. Pass it ONLY
+   * for true renames: for a copy the old path is unrelated and may carry edits
+   * the user did not ask to discard.
+   */
+  async revertFileToRef(
+    repoRoot: string,
+    ref: string,
+    relPath: string,
+    renameFrom?: string,
+  ): Promise<void> {
+    if (ref.startsWith('-')) {
+      throw new Error(`GitDiff: refs cannot begin with '-' (got '${ref}').`);
+    }
+    // `:(literal)` pathspec magic: `--` only ends options, it does NOT disable
+    // glob interpretation — a path containing `*`, `?`, or `[…]` would
+    // otherwise match (and destructively revert/unstage) sibling files. The
+    // prefix forces git to treat the whole string as a literal path.
+    const literalPath = `:(literal)${relPath}`;
+    if (renameFrom && renameFrom !== relPath) {
+      // Rename revert: restore the old name from the target FIRST (so a failure
+      // aborts before we delete anything), then drop the new path.
+      await execGit(
+        this.gitPath(),
+        ['checkout', ref, '--', `:(literal)${renameFrom}`],
+        repoRoot,
+      );
+      // Index-only (`--cached`): drop the stale new-path entry. Safe to run
+      // unconditionally — it never touches the working tree.
+      await execGit(
+        this.gitPath(),
+        ['rm', '-f', '--cached', '--ignore-unmatch', '--', literalPath],
+        repoRoot,
+      );
+      // Delete the new path from disk ONLY if it is a distinct filesystem entry
+      // from the just-restored old path. A case-only rename (`Foo.ts` →
+      // `foo.ts`) on a case-insensitive FS (default macOS/Windows) makes both
+      // names the same inode, so deleting `relPath` would wipe the file the
+      // checkout above just restored.
+      const newAbs = path.join(repoRoot, relPath);
+      const oldAbs = path.join(repoRoot, renameFrom);
+      if (!isSameFsEntry(newAbs, oldAbs)) {
+        await fs.promises.rm(newAbs, { recursive: true, force: true });
+      }
+      return;
+    }
+    if (await this.pathExistsAtRef(repoRoot, ref, relPath)) {
+      // No `--end-of-options` here: `git checkout` misparses it as a second
+      // ref ("only one reference expected, 2 given"). The leading-`-` guard
+      // above is what protects the ref from being read as an option; `--`
+      // separates it from the pathspec.
+      await execGit(this.gitPath(), ['checkout', ref, '--', literalPath], repoRoot);
+      return;
+    }
+    // Not present at `ref`: a working-tree addition (tracked-but-new or
+    // untracked). `--ignore-unmatch` keeps `rm` at exit 0 when the path was
+    // never staged, so we do NOT pass `allowNonZero` — a real failure (index
+    // lock, rejected pathspec) must throw and abort before we delete from
+    // disk, rather than leaving the index and working tree out of sync.
+    // `-f` overrides the staged-content safety check.
+    await execGit(
+      this.gitPath(),
+      ['rm', '-f', '--cached', '--ignore-unmatch', '--', literalPath],
+      repoRoot,
+    );
+    // `recursive` so a directory-shaped entry (an added gitlink/submodule or an
+    // untracked nested repo, which git reports as a single path) is removed
+    // rather than throwing EISDIR; `force` so a path already gone is a no-op.
+    await fs.promises.rm(path.join(repoRoot, relPath), { recursive: true, force: true });
   }
 
   /**

@@ -143,6 +143,53 @@ export function activate(context: vscode.ExtensionContext): GitDiffExports {
         await opener.open(vscode.Uri.file(file.absPath), target);
       },
     ),
+    vscode.commands.registerCommand(
+      'gitdiff.changedFiles.revertFile',
+      async (file?: ChangedFile) => {
+        // The webview always passes a ChangedFile, but the command is also
+        // reachable from the Command Palette / a keybinding with no argument —
+        // no-op rather than throwing on `file.relPath`.
+        if (!file || typeof file.relPath !== 'string') {
+          void vscode.window.showInformationMessage(
+            'GitDiff: use the ↺ button on a file in the Changed Files view to revert it.',
+          );
+          return;
+        }
+        const target = changedFiles.getCurrentTarget();
+        const repoRoot = changedFiles.getCurrentRepoRoot();
+        if (!target || !repoRoot) return;
+        const name = file.relPath.split('/').pop() ?? file.relPath;
+        const choice = await vscode.window.showWarningMessage(
+          `Revert "${name}" to ${target.display}? This discards your working-tree changes to this file.`,
+          { modal: true },
+          'Revert',
+        );
+        if (choice !== 'Revert') return;
+        try {
+          // Revert to the pinned `target.ref` deliberately — NOT a re-resolved
+          // branch tip. The sidebar's file list and every diff it opens are
+          // computed against this exact SHA (ChangedFilesProvider holds it for
+          // the target's lifetime), so reverting to it keeps the result
+          // consistent with the diff the user is looking at. Re-resolving a
+          // branch that advanced since selection would restore content that
+          // doesn't match the displayed comparison.
+          //
+          // For a rename, pass the old path so the revert also restores the
+          // original name. Only for `R` — a copy's source is an unrelated file
+          // that may carry edits the user didn't ask to discard.
+          const renameFrom = file.status === 'R' ? file.origPath : undefined;
+          await git.revertFileToRef(repoRoot, target.ref, file.relPath, renameFrom);
+        } catch (err) {
+          void vscode.window.showErrorMessage(
+            `GitDiff: failed to revert ${file.relPath}: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+          return;
+        }
+        await changedFiles.refresh();
+      },
+    ),
     vscode.commands.registerCommand('gitdiff.changedFiles.clearTarget', async () => {
       const tabs: vscode.Tab[] = [];
       for (const { tab } of openGitdiffTabs()) tabs.push(tab);

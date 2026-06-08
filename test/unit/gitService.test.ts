@@ -39,6 +39,10 @@ function makeRepo(): string {
   git(root, ['config', 'user.email', 'test@example.com']);
   git(root, ['config', 'user.name', 'Test']);
   git(root, ['config', 'commit.gpgsign', 'false']);
+  // Pin rename detection on so the rename-revert tests are deterministic
+  // regardless of the host/CI `diff.renames` config (production relies on the
+  // git default rather than forcing `-M`; see GitService.listChangedPaths).
+  git(root, ['config', 'diff.renames', 'true']);
   return root;
 }
 
@@ -379,6 +383,175 @@ describe('GitService', function () {
     assert.ok(!byPath.has('kept.txt'));
   });
 
+  it('revertFileToRef restores a modified file to its content at the ref', async () => {
+    const wt = makeRepo();
+    fs.writeFileSync(path.join(wt, 'modify.txt'), 'before\n');
+    commit(wt, 'baseline');
+    fs.writeFileSync(path.join(wt, 'modify.txt'), 'after\n');
+
+    await svc.revertFileToRef(wt, 'HEAD', 'modify.txt');
+    assert.strictEqual(fs.readFileSync(path.join(wt, 'modify.txt'), 'utf8'), 'before\n');
+    const changes = await svc.listChangedPaths(wt, 'HEAD');
+    assert.ok(!changes.some((c: { relPath: string }) => c.relPath === 'modify.txt'));
+  });
+
+  it('revertFileToRef recreates a file deleted in the working tree', async () => {
+    const wt = makeRepo();
+    fs.writeFileSync(path.join(wt, 'remove.txt'), 'keepme\n');
+    commit(wt, 'baseline');
+    fs.unlinkSync(path.join(wt, 'remove.txt'));
+    git(wt, ['rm', '--quiet', 'remove.txt']);
+
+    await svc.revertFileToRef(wt, 'HEAD', 'remove.txt');
+    assert.strictEqual(fs.readFileSync(path.join(wt, 'remove.txt'), 'utf8'), 'keepme\n');
+  });
+
+  it('revertFileToRef deletes a staged addition absent from the ref', async () => {
+    const wt = makeRepo();
+    fs.writeFileSync(path.join(wt, 'seed.txt'), 'seed\n');
+    commit(wt, 'baseline');
+    fs.writeFileSync(path.join(wt, 'added.txt'), 'new\n');
+    git(wt, ['add', 'added.txt']);
+
+    await svc.revertFileToRef(wt, 'HEAD', 'added.txt');
+    assert.ok(!fs.existsSync(path.join(wt, 'added.txt')));
+    const changes = await svc.listChangedPaths(wt, 'HEAD');
+    assert.ok(!changes.some((c: { relPath: string }) => c.relPath === 'added.txt'));
+  });
+
+  it('revertFileToRef deletes an untracked file absent from the ref', async () => {
+    const wt = makeRepo();
+    fs.writeFileSync(path.join(wt, 'seed.txt'), 'seed\n');
+    commit(wt, 'baseline');
+    fs.writeFileSync(path.join(wt, 'untracked.txt'), 'y\n');
+
+    await svc.revertFileToRef(wt, 'HEAD', 'untracked.txt');
+    assert.ok(!fs.existsSync(path.join(wt, 'untracked.txt')));
+  });
+
+  it('revertFileToRef treats glob metacharacters in the path literally', async () => {
+    const wt = makeRepo();
+    // A file literally named with a bracket, plus a sibling a glob would catch.
+    fs.writeFileSync(path.join(wt, 'a[1].txt'), 'orig\n');
+    fs.writeFileSync(path.join(wt, 'a1.txt'), 'sibling\n');
+    commit(wt, 'baseline');
+    fs.writeFileSync(path.join(wt, 'a[1].txt'), 'changed\n');
+    fs.writeFileSync(path.join(wt, 'a1.txt'), 'sibling changed\n');
+
+    await svc.revertFileToRef(wt, 'HEAD', 'a[1].txt');
+    // Only the literal target is reverted; the glob-adjacent sibling is left.
+    assert.strictEqual(fs.readFileSync(path.join(wt, 'a[1].txt'), 'utf8'), 'orig\n');
+    assert.strictEqual(fs.readFileSync(path.join(wt, 'a1.txt'), 'utf8'), 'sibling changed\n');
+  });
+
+  it('revertFileToRef deletes a metachar-named addition without harming a glob-adjacent sibling', async () => {
+    const wt = makeRepo();
+    // `a1.txt` is committed (a glob `a[1].txt` would match it); the literal
+    // `a[1].txt` is a NEW working-tree addition absent from HEAD.
+    fs.writeFileSync(path.join(wt, 'a1.txt'), 'committed\n');
+    commit(wt, 'baseline');
+    fs.writeFileSync(path.join(wt, 'a[1].txt'), 'new addition\n');
+
+    // Existence gate must report the literal addition as absent (not confuse
+    // it with the committed sibling), so revert takes the delete branch.
+    assert.strictEqual(await svc.pathExistsAtRef(wt, 'HEAD', 'a[1].txt'), false);
+    assert.strictEqual(await svc.pathExistsAtRef(wt, 'HEAD', 'a1.txt'), true);
+
+    await svc.revertFileToRef(wt, 'HEAD', 'a[1].txt');
+    assert.ok(!fs.existsSync(path.join(wt, 'a[1].txt')), 'the literal addition is deleted');
+    assert.ok(fs.existsSync(path.join(wt, 'a1.txt')), 'the glob-adjacent sibling survives');
+    assert.strictEqual(fs.readFileSync(path.join(wt, 'a1.txt'), 'utf8'), 'committed\n');
+  });
+
+  it('revertFileToRef removes a directory-shaped untracked entry absent from the ref', async () => {
+    const wt = makeRepo();
+    fs.writeFileSync(path.join(wt, 'seed.txt'), 'seed\n');
+    commit(wt, 'baseline');
+    // A directory git would surface as a single changed/untracked path (the
+    // shape an embedded repo / added gitlink takes). fs.rm must recurse.
+    fs.mkdirSync(path.join(wt, 'vendor'));
+    fs.writeFileSync(path.join(wt, 'vendor', 'inner.txt'), 'x\n');
+
+    await svc.revertFileToRef(wt, 'HEAD', 'vendor');
+    assert.ok(!fs.existsSync(path.join(wt, 'vendor')), 'directory entry should be removed');
+  });
+
+  it('revertFileToRef of a rename restores the old name and removes the new one', async () => {
+    const wt = makeRepo();
+    fs.writeFileSync(path.join(wt, 'old.txt'), 'line1\nline2\nline3\nline4\nline5\n');
+    commit(wt, 'baseline');
+    // Rename old.txt -> new.txt and stage it (content unchanged so git detects
+    // a rename, not add+delete). Staging is what makes `git diff HEAD` surface
+    // an `R` row — an unstaged new file is untracked and excluded from diff.
+    fs.renameSync(path.join(wt, 'old.txt'), path.join(wt, 'new.txt'));
+    git(wt, ['add', '-A']);
+
+    // Sanity: the diff vs HEAD surfaces a rename with old.txt as origPath.
+    const changes = await svc.listChangedPaths(wt, 'HEAD');
+    const rename = changes.find((c: { status: string }) => c.status === 'R');
+    assert.ok(rename, 'expected a rename entry');
+    assert.strictEqual(rename.relPath, 'new.txt');
+    assert.strictEqual(rename.origPath, 'old.txt');
+
+    await svc.revertFileToRef(wt, 'HEAD', 'new.txt', 'old.txt');
+    assert.ok(!fs.existsSync(path.join(wt, 'new.txt')), 'new name should be gone');
+    assert.ok(fs.existsSync(path.join(wt, 'old.txt')), 'old name should be restored');
+    // Working tree now matches HEAD: no remaining differences.
+    const after = await svc.listChangedPaths(wt, 'HEAD');
+    assert.strictEqual(after.length, 0, `expected clean tree, got ${JSON.stringify(after)}`);
+  });
+
+  it('revertFileToRef of a case-only rename restores the target name and leaves a clean tree', async () => {
+    const wt = makeRepo();
+    fs.writeFileSync(path.join(wt, 'Foo.ts'), 'content\n');
+    commit(wt, 'baseline');
+    // Case-only rename. On a case-insensitive FS (default macOS/Windows) both
+    // names share one inode; the revert must not delete the restored file.
+    // `-f` because git otherwise refuses ("destination exists") when the
+    // case-insensitive FS reports `foo.ts` as already present.
+    git(wt, ['mv', '-f', 'Foo.ts', 'foo.ts']);
+    const rename = (await svc.listChangedPaths(wt, 'HEAD')).find(
+      (c: { status: string }) => c.status === 'R',
+    );
+    assert.ok(rename, 'expected a rename entry');
+
+    await svc.revertFileToRef(wt, 'HEAD', rename.relPath, rename.origPath);
+    assert.ok(fs.existsSync(path.join(wt, 'Foo.ts')), 'target-cased name must survive');
+    assert.strictEqual(fs.readFileSync(path.join(wt, 'Foo.ts'), 'utf8'), 'content\n');
+    const after = await svc.listChangedPaths(wt, 'HEAD');
+    assert.strictEqual(after.length, 0, `expected clean tree, got ${JSON.stringify(after)}`);
+  });
+
+  it('revertFileToRef of a renamed symlink removes the new link (lstat, not stat)', async () => {
+    const wt = makeRepo();
+    fs.writeFileSync(path.join(wt, 'target.txt'), 'target\n');
+    try {
+      fs.symlinkSync('target.txt', path.join(wt, 'link-old'));
+    } catch {
+      // Some platforms/CI (Windows without privilege) restrict symlinks; skip.
+      return;
+    }
+    commit(wt, 'baseline');
+    // Rename the symlink. Old and new links point at the same target, so a
+    // target-following stat would conflate them; lstat keeps them distinct.
+    git(wt, ['mv', 'link-old', 'link-new']);
+    const rename = (await svc.listChangedPaths(wt, 'HEAD')).find(
+      (c: { status: string }) => c.status === 'R',
+    );
+    assert.ok(rename, 'expected a rename entry');
+    assert.strictEqual(rename.relPath, 'link-new');
+
+    await svc.revertFileToRef(wt, 'HEAD', rename.relPath, rename.origPath);
+    assert.ok(!fs.existsSync(path.join(wt, 'link-new')), 'new link must be removed');
+    assert.ok(fs.lstatSync(path.join(wt, 'link-old')).isSymbolicLink(), 'old link restored');
+    const after = await svc.listChangedPaths(wt, 'HEAD');
+    assert.strictEqual(after.length, 0, `expected clean tree, got ${JSON.stringify(after)}`);
+  });
+
+  it('revertFileToRef rejects refs beginning with "-"', async () => {
+    await assert.rejects(svc.revertFileToRef(root, '-rf', 'a.txt'));
+  });
+
   it('listUntrackedPaths returns only untracked files', async () => {
     const wt = makeRepo();
     fs.writeFileSync(path.join(wt, 'tracked.txt'), 'x\n');
@@ -561,18 +734,18 @@ describe('parseNameStatusZ', () => {
     ]);
   });
 
-  it('parses a rename, keeping only the new path with status R', () => {
+  it('parses a rename, keeping the new path with status R and the old path as origPath', () => {
     // R<score>NUL<old>NUL<new>NUL
     const input = 'R100\0old/path.ts\0new/path.ts\0';
     assert.deepStrictEqual(parseNameStatusZ(input), [
-      { relPath: 'new/path.ts', status: 'R' },
+      { relPath: 'new/path.ts', status: 'R', origPath: 'old/path.ts' },
     ]);
   });
 
-  it('parses a copy, keeping only the new path with status C', () => {
+  it('parses a copy, keeping the new path with status C and the source as origPath', () => {
     const input = 'C075\0src.ts\0copy.ts\0';
     assert.deepStrictEqual(parseNameStatusZ(input), [
-      { relPath: 'copy.ts', status: 'C' },
+      { relPath: 'copy.ts', status: 'C', origPath: 'src.ts' },
     ]);
   });
 
@@ -588,7 +761,7 @@ describe('parseNameStatusZ', () => {
     const input = 'M\0a.txt\0R090\0from.ts\0to.ts\0D\0d.txt\0';
     assert.deepStrictEqual(parseNameStatusZ(input), [
       { relPath: 'a.txt', status: 'M' },
-      { relPath: 'to.ts', status: 'R' },
+      { relPath: 'to.ts', status: 'R', origPath: 'from.ts' },
       { relPath: 'd.txt', status: 'D' },
     ]);
   });

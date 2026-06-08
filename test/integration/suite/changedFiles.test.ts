@@ -2,7 +2,7 @@ import * as assert from 'assert';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { commit, git, makeRepo, settle } from './helpers';
+import { commit, git, makeRepo, realRepoPath, settle, withWarningResponse } from './helpers';
 import { filterFiles } from '../../../src/changedFilesProvider';
 import type { GitDiffExports } from '../../../src/extension';
 
@@ -253,6 +253,128 @@ describe('changedFiles provider (e2e)', function () {
     assert.ok(invalid.error, 'invalid regex should produce an error');
     // Path filters were no-ops; everything passes path filter.
     assert.strictEqual(invalid.files.length, files.length);
+
+    await api.changedFiles.clearTarget();
+  });
+
+  it('revertFile restores a modified file to the target and drops it from the list', async () => {
+    const api = await getApi();
+    const root = makeRepo();
+    fs.writeFileSync(path.join(root, 'a.ts'), 'export const a = 1;\n');
+    commit(root, 'baseline');
+    fs.writeFileSync(path.join(root, 'a.ts'), 'export const a = 99;\n');
+    const headFull = git(root, ['rev-parse', 'HEAD']).trim();
+    const repoRoot = realRepoPath(root);
+
+    await api.changedFiles.setTarget({ ref: headFull, display: headFull.slice(0, 8) }, repoRoot);
+    await settle(50);
+    assert.ok(api.changedFiles.getAllFiles().some((f) => f.relPath === 'a.ts'));
+
+    const prompts = await withWarningResponse('Revert', async () => {
+      await vscode.commands.executeCommand('gitdiff.changedFiles.revertFile', {
+        relPath: 'a.ts',
+        absPath: path.join(repoRoot, 'a.ts'),
+        status: 'M',
+      });
+    });
+    await settle(50);
+
+    assert.strictEqual(prompts.length, 1, 'a confirmation dialog must be shown');
+    assert.match(prompts[0], /Revert/);
+    assert.strictEqual(fs.readFileSync(path.join(repoRoot, 'a.ts'), 'utf8'), 'export const a = 1;\n');
+    assert.ok(
+      !api.changedFiles.getAllFiles().some((f) => f.relPath === 'a.ts'),
+      'reverted file should no longer differ from the target',
+    );
+
+    await api.changedFiles.clearTarget();
+  });
+
+  it('revertFile does nothing when the confirmation is dismissed', async () => {
+    const api = await getApi();
+    const root = makeRepo();
+    fs.writeFileSync(path.join(root, 'a.ts'), 'export const a = 1;\n');
+    commit(root, 'baseline');
+    fs.writeFileSync(path.join(root, 'a.ts'), 'export const a = 99;\n');
+    const headFull = git(root, ['rev-parse', 'HEAD']).trim();
+    const repoRoot = realRepoPath(root);
+
+    await api.changedFiles.setTarget({ ref: headFull, display: headFull.slice(0, 8) }, repoRoot);
+    await settle(50);
+
+    const prompts = await withWarningResponse(undefined, async () => {
+      await vscode.commands.executeCommand('gitdiff.changedFiles.revertFile', {
+        relPath: 'a.ts',
+        absPath: path.join(repoRoot, 'a.ts'),
+        status: 'M',
+      });
+    });
+    await settle(50);
+
+    assert.strictEqual(prompts.length, 1, 'a confirmation dialog must be shown');
+    assert.strictEqual(
+      fs.readFileSync(path.join(repoRoot, 'a.ts'), 'utf8'),
+      'export const a = 99;\n',
+      'dismissing the dialog must leave the working-tree file untouched',
+    );
+    assert.ok(api.changedFiles.getAllFiles().some((f) => f.relPath === 'a.ts'));
+
+    await api.changedFiles.clearTarget();
+  });
+
+  it('revertFile deletes a working-tree addition absent from the target', async () => {
+    const api = await getApi();
+    const root = makeRepo();
+    fs.writeFileSync(path.join(root, 'kept.ts'), 'kept\n');
+    commit(root, 'baseline');
+    fs.writeFileSync(path.join(root, 'added.ts'), 'brand new\n');
+    const headFull = git(root, ['rev-parse', 'HEAD']).trim();
+    const repoRoot = realRepoPath(root);
+
+    await api.changedFiles.setTarget({ ref: headFull, display: headFull.slice(0, 8) }, repoRoot);
+    await settle(50);
+    assert.ok(api.changedFiles.getAllFiles().some((f) => f.relPath === 'added.ts'));
+
+    await withWarningResponse('Revert', async () => {
+      await vscode.commands.executeCommand('gitdiff.changedFiles.revertFile', {
+        relPath: 'added.ts',
+        absPath: path.join(repoRoot, 'added.ts'),
+        status: '?',
+      });
+    });
+    await settle(50);
+
+    assert.ok(!fs.existsSync(path.join(repoRoot, 'added.ts')), 'addition should be deleted');
+    assert.ok(!api.changedFiles.getAllFiles().some((f) => f.relPath === 'added.ts'));
+
+    await api.changedFiles.clearTarget();
+  });
+
+  it('revertFile recreates a file deleted from the working tree', async () => {
+    const api = await getApi();
+    const root = makeRepo();
+    fs.writeFileSync(path.join(root, 'gone.ts'), 'restore me\n');
+    commit(root, 'baseline');
+    fs.unlinkSync(path.join(root, 'gone.ts'));
+    git(root, ['rm', '--quiet', 'gone.ts']);
+    const headFull = git(root, ['rev-parse', 'HEAD']).trim();
+    const repoRoot = realRepoPath(root);
+
+    await api.changedFiles.setTarget({ ref: headFull, display: headFull.slice(0, 8) }, repoRoot);
+    await settle(50);
+    assert.ok(api.changedFiles.getAllFiles().some((f) => f.relPath === 'gone.ts'));
+
+    await withWarningResponse('Revert', async () => {
+      await vscode.commands.executeCommand('gitdiff.changedFiles.revertFile', {
+        relPath: 'gone.ts',
+        absPath: path.join(repoRoot, 'gone.ts'),
+        status: 'D',
+      });
+    });
+    await settle(50);
+
+    assert.strictEqual(fs.readFileSync(path.join(repoRoot, 'gone.ts'), 'utf8'), 'restore me\n');
+    assert.ok(!api.changedFiles.getAllFiles().some((f) => f.relPath === 'gone.ts'));
 
     await api.changedFiles.clearTarget();
   });

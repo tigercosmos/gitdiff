@@ -19,6 +19,9 @@ export function makeRepo(): string {
   git(root, ['config', 'user.email', 'test@example.com']);
   git(root, ['config', 'user.name', 'Test']);
   git(root, ['config', 'commit.gpgsign', 'false']);
+  // Deterministic rename detection across hosts/CI (production uses the git
+  // default; see GitService.listChangedPaths for why we don't force `-M`).
+  git(root, ['config', 'diff.renames', 'true']);
   return root;
 }
 
@@ -380,6 +383,30 @@ export function captureMessages(): MessageCapture {
     (vscode.window as any).showErrorMessage = origE;
   };
   return cap;
+}
+
+/**
+ * Replace `showWarningMessage` for the duration of `fn` so a modal
+ * confirmation resolves to `response` (the label the user "clicked", or
+ * `undefined` to simulate dismissing the dialog). Records every prompt shown.
+ * Returns the captured prompt strings after `fn` settles.
+ */
+export async function withWarningResponse(
+  response: string | undefined,
+  fn: () => Thenable<unknown> | Promise<unknown>,
+): Promise<string[]> {
+  const prompts: string[] = [];
+  const orig = vscode.window.showWarningMessage;
+  (vscode.window as any).showWarningMessage = (msg: string) => {
+    prompts.push(msg);
+    return Promise.resolve(response);
+  };
+  try {
+    await fn();
+  } finally {
+    (vscode.window as any).showWarningMessage = orig;
+  }
+  return prompts;
 }
 
 /** Close every editor and every tab in every group. */
