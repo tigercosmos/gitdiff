@@ -4,3 +4,4 @@ out/
 *.vsix
 .DS_Store
 .env
+*.lock
