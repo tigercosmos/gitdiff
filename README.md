@@ -4,10 +4,10 @@
   </td></tr></table>
 </p>
 
-<h1 align="center">GitDiff</h1>
+<h1 align="center">GitDiff — Git Diff Against Any Branch or Commit</h1>
 
 <p align="center">
-  <strong>Diff your working tree against any branch or commit — and keep editing.</strong>
+  <strong>Git diff your working tree against any branch or commit — and keep editing.</strong>
 </p>
 
 <p align="center">
@@ -49,7 +49,9 @@ GitDiff does exactly that — and unlike a read-only `git diff`, **the working-t
 
 ## Install
 
-**From the Marketplace**
+**From the VS Code Marketplace**
+
+Search for **git diff** or **Git Diff**, or install directly:
 
 ```
 ext install tigercosmos.gitdiff
@@ -58,7 +60,7 @@ ext install tigercosmos.gitdiff
 **From a `.vsix`**
 
 ```bash
-code --install-extension gitdiff-0.6.0.vsix
+code --install-extension gitdiff-0.7.1.vsix
 ```
 
 ## Usage

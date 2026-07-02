@@ -1,8 +1,22 @@
 {
   "name": "gitdiff",
-  "displayName": "GitDiff",
-  "description": "Diff your working-tree file against any branch or commit, with the working-tree side editable.",
-  "version": "0.7.0",
+  "displayName": "Git Diff (GitDiff)",
+  "description": "Git diff your working-tree files against any branch or commit — editable diff panes, blame, and a changed-files sidebar.",
+  "keywords": [
+    "git diff",
+    "git",
+    "diff",
+    "compare",
+    "branch",
+    "commit",
+    "blame",
+    "scm",
+    "version control",
+    "working tree",
+    "changed files",
+    "merge"
+  ],
+  "version": "0.7.1",
   "publisher": "tigercosmos",
   "icon": "icons/activity.png",
   "engines": {

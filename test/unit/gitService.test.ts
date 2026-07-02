@@ -39,6 +39,9 @@ function makeRepo(): string {
   git(root, ['config', 'user.email', 'test@example.com']);
   git(root, ['config', 'user.name', 'Test']);
   git(root, ['config', 'commit.gpgsign', 'false']);
+  // Pin LF on all platforms: Windows CI defaults core.autocrlf=true, which
+  // makes `git checkout` write CRLF and breaks content assertions.
+  git(root, ['config', 'core.autocrlf', 'false']);
   // Pin rename detection on so the rename-revert tests are deterministic
   // regardless of the host/CI `diff.renames` config (production relies on the
   // git default rather than forcing `-M`; see GitService.listChangedPaths).

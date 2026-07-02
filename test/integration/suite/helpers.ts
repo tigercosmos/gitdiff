@@ -19,6 +19,8 @@ export function makeRepo(): string {
   git(root, ['config', 'user.email', 'test@example.com']);
   git(root, ['config', 'user.name', 'Test']);
   git(root, ['config', 'commit.gpgsign', 'false']);
+  // Pin LF on all platforms (see unit test makeRepo for rationale).
+  git(root, ['config', 'core.autocrlf', 'false']);
   // Deterministic rename detection across hosts/CI (production uses the git
   // default; see GitService.listChangedPaths for why we don't force `-M`).
   git(root, ['config', 'diff.renames', 'true']);
