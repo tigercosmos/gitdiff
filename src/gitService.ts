@@ -276,6 +276,44 @@ export class GitService {
     return path.relative(repoRoot, path.join(canonDir, base)).split(path.sep).join('/');
   }
 
+  /**
+   * Absolute path of the repo's git directory (`.git`, or for a linked
+   * worktree its `…/.git/worktrees/<name>` dir). Used to watch HEAD/index for
+   * state changes; a worktree's own gitdir is exactly where its HEAD and
+   * index live, so this resolves correctly for worktrees too.
+   */
+  async gitDir(repoRoot: string): Promise<string> {
+    const r = await execGit(this.gitPath(), ['rev-parse', '--absolute-git-dir'], repoRoot);
+    return r.stdout.toString('utf8').trim();
+  }
+
+  /**
+   * True iff `name` names an existing local or remote-tracking branch
+   * (`refs/heads/<name>` or `refs/remotes/<name>`). Used to decide whether a
+   * free-typed target should get branch semantics — i.e. re-resolve to the
+   * branch tip on refresh — rather than being pinned to the resolved SHA the
+   * way tags and raw SHAs are.
+   */
+  async isBranch(repoRoot: string, name: string): Promise<boolean> {
+    const trimmed = name.trim();
+    if (!trimmed || trimmed.startsWith('-')) return false;
+    const [local, remote] = await Promise.all([
+      execGit(
+        this.gitPath(),
+        ['show-ref', '--verify', '--quiet', `refs/heads/${trimmed}`],
+        repoRoot,
+        { allowNonZero: true },
+      ),
+      execGit(
+        this.gitPath(),
+        ['show-ref', '--verify', '--quiet', `refs/remotes/${trimmed}`],
+        repoRoot,
+        { allowNonZero: true },
+      ),
+    ]);
+    return local.code === 0 || remote.code === 0;
+  }
+
   async listBranchesLocal(repoRoot: string): Promise<BranchInfo[]> {
     const r = await execGit(
       this.gitPath(),
@@ -683,15 +721,29 @@ export class GitService {
    * present in the tree at this ref; any other failure throws.
    */
   async showFileAtSha(repoRoot: string, sha: string, relPath: string): Promise<ShowResult> {
-    const exists = await this.pathExistsAtRef(repoRoot, sha, relPath);
+    // Run the existence probe and the content read concurrently — this is on
+    // the open-a-diff hot path, and two sequential git spawns double its
+    // latency. `show` gets allowNonZero because it legitimately fails when the
+    // path is absent at the ref; `pathExistsAtRef` decides which case we're in.
+    const [exists, r] = await Promise.all([
+      this.pathExistsAtRef(repoRoot, sha, relPath),
+      execGit(
+        this.gitPath(),
+        ['show', '--end-of-options', `${sha}:${relPath}`],
+        repoRoot,
+        { allowNonZero: true },
+      ),
+    ]);
     if (!exists) {
       return { exists: false, bytes: Buffer.alloc(0), kind: 'text' };
     }
-    const r = await execGit(
-      this.gitPath(),
-      ['show', '--end-of-options', `${sha}:${relPath}`],
-      repoRoot,
-    );
+    if (r.code !== 0) {
+      throw new Error(
+        `GitDiff: git show failed for ${relPath} at ${sha.slice(0, 8)}: ${r.stderr
+          .toString('utf8')
+          .trim()}`,
+      );
+    }
     const kind = classifyBlob(r.stdout);
     return { exists: true, bytes: r.stdout, kind };
   }

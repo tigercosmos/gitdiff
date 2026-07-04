@@ -106,6 +106,19 @@ describe('execGit', function () {
       'ce013625030ba8dba906f756967f9e9ca394464a',
     );
   });
+
+  it('spawns the child with GIT_OPTIONAL_LOCKS=0 while inheriting the parent env', async () => {
+    // execGit runs whatever binary it's given — use node as a portable env
+    // probe instead of relying on shell aliases (which differ on Windows).
+    const r = await execGit(
+      process.execPath,
+      ['-e', 'console.log(JSON.stringify([process.env.GIT_OPTIONAL_LOCKS, !!process.env.PATH]))'],
+      root,
+    );
+    const [locks, hasPath] = JSON.parse(r.stdout.toString('utf8'));
+    assert.strictEqual(locks, '0');
+    assert.strictEqual(hasPath, true);
+  });
 });
 
 describe('ExecError', () => {

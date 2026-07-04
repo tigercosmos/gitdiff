@@ -177,6 +177,91 @@ describe('filterFiles (content search)', () => {
     // a strict subset of the full pathOk set.
     assert.ok(out.files.length < files.length, 'cancellation should short-circuit');
   });
+
+  it('combines include + exclude + case-sensitive whole-word content search in one pass', async () => {
+    const candidates = [
+      realFile('pipe/src/match.ts', 'const Needle = 1;\n'), // ✓ all filters
+      realFile('pipe/src/case.ts', 'const needle = 1;\n'), // ✗ case
+      realFile('pipe/src/word.ts', 'const Needles = 1;\n'), // ✗ whole word
+      realFile('pipe/src/skip.md', 'Needle\n'), // ✗ include glob
+      realFile('pipe/src/gen/out.ts', 'Needle\n'), // ✗ exclude glob
+    ];
+    const out = await filterFiles(candidates, {
+      search: 'Needle',
+      include: '**/*.ts',
+      exclude: '**/gen/**',
+      matchCase: true,
+      matchWholeWord: true,
+      useRegex: false,
+    });
+    assert.deepStrictEqual(
+      out.files.map((f: ChangedFile) => f.relPath),
+      ['pipe/src/match.ts'],
+    );
+  });
+
+  it('regex search composes with path filters and matches across lines with ^/$', async () => {
+    const candidates = [
+      realFile('re/a.ts', 'import x from "y";\nexport default x;\n'),
+      realFile('re/b.ts', 'const s = "export default x";\n'), // ✗ mid-line, ^ anchor misses
+      realFile('re/c.md', 'export default x\n'), // excluded by include glob
+    ];
+    const out = await filterFiles(candidates, {
+      ...blankFilter,
+      include: '**/*.ts',
+      search: '^export default',
+      useRegex: true,
+    });
+    assert.deepStrictEqual(
+      out.files.map((f: ChangedFile) => f.relPath),
+      ['re/a.ts'],
+    );
+  });
+
+  it('skips files above the size cap instead of reading them', async () => {
+    // 5 MB cap + 1 byte: must be skipped even though the needle is inside.
+    const big = realFile('big/huge.txt', 'needle' + 'x'.repeat(5 * 1024 * 1024));
+    const small = realFile('big/small.txt', 'needle\n');
+    const out = await filterFiles([big, small], { ...blankFilter, search: 'needle' });
+    assert.deepStrictEqual(
+      out.files.map((f: ChangedFile) => f.relPath),
+      ['big/small.txt'],
+    );
+  });
+
+  it('unreadable candidates are dropped without failing the scan', async () => {
+    const ok = realFile('err/ok.txt', 'needle\n');
+    const missing: ChangedFile = {
+      relPath: 'err/vanished.txt',
+      absPath: path.join(tmp, 'err/vanished.txt'), // never created
+      status: 'M',
+    };
+    const dir: ChangedFile = {
+      relPath: 'err/adir',
+      absPath: path.join(tmp, 'err/adir'),
+      status: 'M',
+    };
+    fs.mkdirSync(dir.absPath, { recursive: true });
+    const out = await filterFiles([missing, dir, ok], { ...blankFilter, search: 'needle' });
+    assert.deepStrictEqual(
+      out.files.map((f: ChangedFile) => f.relPath),
+      ['err/ok.txt'],
+    );
+  });
+
+  it('non-ASCII content and paths survive the pipeline', async () => {
+    const target = realFile('uni/café/檔案.ts', 'const 変数 = "ütf-8";\n');
+    const other = realFile('uni/plain.ts', 'nothing here\n');
+    const out = await filterFiles([target, other], {
+      ...blankFilter,
+      include: 'uni/',
+      search: '変数',
+    });
+    assert.deepStrictEqual(
+      out.files.map((f: ChangedFile) => f.relPath),
+      ['uni/café/檔案.ts'],
+    );
+  });
 });
 
 describe('computeWorktreeExclusion', () => {

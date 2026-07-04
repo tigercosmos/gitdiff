@@ -718,6 +718,86 @@ describe('GitService.repoRoot worktree resolution', function () {
   });
 });
 
+describe('GitService.gitDir', function () {
+  this.timeout(20000);
+  const svc = new GitService();
+
+  it('resolves the main repo gitdir to <root>/.git', async () => {
+    const root = makeRepo();
+    commit(root, 'seed');
+    const dir = await svc.gitDir(root);
+    assert.strictEqual(
+      fs.realpathSync.native(dir),
+      fs.realpathSync.native(path.join(root, '.git')),
+    );
+  });
+
+  it("resolves a linked worktree to its own gitdir (where its HEAD/index live), not the main .git", async () => {
+    const root = makeRepo();
+    fs.writeFileSync(path.join(root, 'seed.txt'), 'seed\n');
+    commit(root, 'seed');
+    git(root, ['branch', 'feature']);
+    const wt = path.join(root, 'wt-feature');
+    git(root, ['worktree', 'add', '-q', wt, 'feature']);
+
+    const dir = await svc.gitDir(wt);
+    // The worktree's gitdir contains its own HEAD and index — the files the
+    // auto-refresh watcher needs to observe for THIS worktree.
+    assert.ok(fs.existsSync(path.join(dir, 'HEAD')), `no HEAD in ${dir}`);
+    assert.notStrictEqual(
+      fs.realpathSync.native(dir),
+      fs.realpathSync.native(path.join(root, '.git')),
+    );
+    assert.match(dir.replace(/\\/g, '/'), /\/worktrees\//);
+  });
+});
+
+describe('GitService.isBranch', function () {
+  this.timeout(20000);
+  const svc = new GitService();
+  let root: string;
+  let sha: string;
+
+  before(() => {
+    root = makeRepo();
+    fs.writeFileSync(path.join(root, 'a.txt'), 'x\n');
+    commit(root, 'init');
+    sha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root }).toString().trim();
+    git(root, ['branch', 'feature/deep/name']);
+    git(root, ['tag', 'v1.0']);
+    // Simulate a remote-tracking branch without a network remote.
+    git(root, ['update-ref', 'refs/remotes/origin/main', sha]);
+  });
+
+  it('true for a local branch', async () => {
+    assert.strictEqual(await svc.isBranch(root, 'main'), true);
+  });
+
+  it('true for a local branch with slashes in the name', async () => {
+    assert.strictEqual(await svc.isBranch(root, 'feature/deep/name'), true);
+  });
+
+  it('true for a remote-tracking branch', async () => {
+    assert.strictEqual(await svc.isBranch(root, 'origin/main'), true);
+  });
+
+  it('false for a tag, even though it resolves to a commit', async () => {
+    assert.strictEqual(await svc.isBranch(root, 'v1.0'), false);
+  });
+
+  it('false for a SHA and for relative revisions', async () => {
+    assert.strictEqual(await svc.isBranch(root, sha), false);
+    assert.strictEqual(await svc.isBranch(root, 'main~0'), false);
+  });
+
+  it('false for nonexistent names, empty input, and leading-dash input', async () => {
+    assert.strictEqual(await svc.isBranch(root, 'no-such-branch'), false);
+    assert.strictEqual(await svc.isBranch(root, ''), false);
+    assert.strictEqual(await svc.isBranch(root, '   '), false);
+    assert.strictEqual(await svc.isBranch(root, '--all'), false);
+  });
+});
+
 describe('parseNameStatusZ', () => {
   it('returns [] for empty input', () => {
     assert.deepStrictEqual(parseNameStatusZ(''), []);

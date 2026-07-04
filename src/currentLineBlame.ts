@@ -53,6 +53,23 @@ export class CurrentLineBlameController implements vscode.Disposable {
   private readonly pathCache = new Map<string, { repoRoot: string; relPath: string } | null>();
   private readonly remoteCache = new Map<string, Promise<RemoteWeb | undefined>>();
 
+  /**
+   * Blame results keyed by (target, line). Walking a file with j/k re-blames
+   * the same lines constantly; without this every cursor move is a fresh git
+   * spawn. Entries for pinned-SHA gitdiff panes are immutable and never
+   * expire; entries tied to a live document (keyed by uri+version) get a
+   * short TTL so an external commit — which changes blame without changing
+   * the buffer — can't serve stale results for long. `handleGitStateChange`
+   * drops everything immediately when the sidebar's repo watcher sees a
+   * commit/checkout.
+   */
+  private static readonly MAX_BLAME_CACHE = 512;
+  private static readonly DOC_ENTRY_TTL_MS = 30_000;
+  private readonly blameCache = new Map<
+    string,
+    { value: Promise<BlameInfo | undefined>; expires: number }
+  >();
+
   // Test seam: the inline annotation currently shown on the active editor's
   // cursor line. Decorations have no read-back API, so this is how e2e tests
   // (and callers) observe what was rendered. Kept in sync with setDecorations.
@@ -80,6 +97,15 @@ export class CurrentLineBlameController implements vscode.Disposable {
       vscode.workspace.onDidChangeTextDocument((e) => {
         if (e.document === vscode.window.activeTextEditor?.document) this.schedule();
       }),
+      // A reopened document restarts version numbering at 1, so cached
+      // (uri, version) keys from the previous open could collide with
+      // different content — drop the document's entries when it closes.
+      vscode.workspace.onDidCloseTextDocument((doc) => {
+        const prefix = `doc\0${doc.uri.toString()}\0`;
+        for (const key of [...this.blameCache.keys()]) {
+          if (key.startsWith(prefix)) this.blameCache.delete(key);
+        }
+      }),
       vscode.workspace.onDidChangeConfiguration((e) => {
         if (!e.affectsConfiguration('gitdiff.lineBlame')) return;
         this.enabled = readEnabled();
@@ -100,6 +126,18 @@ export class CurrentLineBlameController implements vscode.Disposable {
     this.disposables.length = 0;
     this.pathCache.clear();
     this.remoteCache.clear();
+    this.blameCache.clear();
+  }
+
+  /**
+   * The repo's git state changed externally (commit, checkout, …): blame for
+   * unchanged buffers may now be different, and a path that wasn't in a repo
+   * may be in one now. Drop caches and repaint the current line.
+   */
+  handleGitStateChange(): void {
+    this.blameCache.clear();
+    this.pathCache.clear();
+    this.schedule();
   }
 
   /**
@@ -155,16 +193,7 @@ export class CurrentLineBlameController implements vscode.Disposable {
 
     let info: BlameInfo | undefined;
     try {
-      info =
-        target.contents !== undefined
-          ? await this.git.blameLineForContents(
-              target.repoRoot,
-              target.relPath,
-              line + 1,
-              target.contents,
-              target.ref,
-            )
-          : await this.git.blameLine(target.repoRoot, target.relPath, line + 1, target.ref);
+      info = await this.blameCached(target, editor.document, line);
     } catch {
       return;
     }
@@ -191,6 +220,53 @@ export class CurrentLineBlameController implements vscode.Disposable {
       },
     ]);
     this.lastAnnotation = { uri: editor.document.uri.toString(), line, text };
+  }
+
+  /**
+   * Memoized blame for one target line. A pinned-SHA gitdiff pane is keyed by
+   * (repo, ref, path, line) and cached indefinitely — that content can never
+   * change. A live document is keyed by (uri, version, path, line): the
+   * version bumps on every edit, so an entry can only go stale via *repo*
+   * changes (commit/checkout), bounded by the TTL and `handleGitStateChange`.
+   */
+  private blameCached(
+    target: LineTarget,
+    document: vscode.TextDocument,
+    line: number,
+  ): Promise<BlameInfo | undefined> {
+    const pinned = target.ref !== undefined && target.contents === undefined;
+    const key = pinned
+      ? ['pin', target.repoRoot, target.ref, target.relPath, line].join('\0')
+      : ['doc', document.uri.toString(), document.version, target.relPath, line].join('\0');
+    const now = Date.now();
+    const hit = this.blameCache.get(key);
+    if (hit && hit.expires > now) return hit.value;
+
+    const value = (
+      target.contents !== undefined
+        ? this.git.blameLineForContents(
+            target.repoRoot,
+            target.relPath,
+            line + 1,
+            target.contents,
+            target.ref,
+          )
+        : this.git.blameLine(target.repoRoot, target.relPath, line + 1, target.ref)
+    ).catch((err) => {
+      // Don't cache failures — but only delete if the entry is still ours.
+      if (this.blameCache.get(key)?.value === value) this.blameCache.delete(key);
+      throw err;
+    });
+    this.blameCache.delete(key); // re-insert so LRU order reflects recency
+    this.blameCache.set(key, {
+      value,
+      expires: pinned ? Number.POSITIVE_INFINITY : now + CurrentLineBlameController.DOC_ENTRY_TTL_MS,
+    });
+    if (this.blameCache.size > CurrentLineBlameController.MAX_BLAME_CACHE) {
+      const oldest = this.blameCache.keys().next().value;
+      if (oldest !== undefined) this.blameCache.delete(oldest);
+    }
+    return value;
   }
 
   private async resolveTarget(document: vscode.TextDocument): Promise<LineTarget | undefined> {
@@ -240,6 +316,12 @@ export class CurrentLineBlameController implements vscode.Disposable {
       loc = relPath && !relPath.startsWith('..') ? { repoRoot, relPath } : null;
     } catch {
       loc = null;
+    }
+    // Bound the cache: a long session touching many files (search results,
+    // go-to-definition across deps) must not grow this without limit.
+    if (this.pathCache.size >= 512) {
+      const oldest = this.pathCache.keys().next().value;
+      if (oldest !== undefined) this.pathCache.delete(oldest);
     }
     this.pathCache.set(fsPath, loc);
     return loc ?? undefined;

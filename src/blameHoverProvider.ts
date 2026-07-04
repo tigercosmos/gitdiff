@@ -87,6 +87,15 @@ export class BlameHoverProvider implements vscode.HoverProvider, vscode.Disposab
     this.remoteCache.clear();
   }
 
+  /**
+   * External git state change (commit/checkout): contents-keyed entries are
+   * keyed by document version, which does NOT change when a commit turns an
+   * "uncommitted" line into a real SHA — drop them all.
+   */
+  handleGitStateChange(): void {
+    this.cache.clear();
+  }
+
   async provideHover(
     document: vscode.TextDocument,
     position: vscode.Position,

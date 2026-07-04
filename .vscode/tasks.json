@@ -4,6 +4,17 @@
     {
       "type": "npm",
       "script": "compile",
+      "group": "build",
+      "problemMatcher": ["$tsc"],
+      "presentation": { "reveal": "silent" }
+    },
+    {
+      // F5 build: the extension's `main` is the esbuild bundle in dist/, so
+      // launching must produce BOTH out/ (tests) and a sourcemapped dev
+      // bundle — `npm: compile` alone would leave dist/extension.js stale
+      // or missing.
+      "type": "npm",
+      "script": "build:dev",
       "group": { "kind": "build", "isDefault": true },
       "problemMatcher": ["$tsc"],
       "presentation": { "reveal": "silent" }

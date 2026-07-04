@@ -36,6 +36,11 @@ export function execGit(
     maxBuffer: options.maxBuffer ?? 50 * 1024 * 1024,
     encoding: 'buffer',
     windowsHide: true,
+    // GIT_OPTIONAL_LOCKS=0: our git calls are background reads and must not
+    // take optional locks (e.g. the index refresh lock), or they can race
+    // VS Code's built-in git extension / the user's own terminal git and
+    // fail with "index.lock exists".
+    env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' },
   };
   return new Promise((resolve, reject) => {
     const child = execFile(gitPath, [...args], opts, (err, stdout, stderr) => {

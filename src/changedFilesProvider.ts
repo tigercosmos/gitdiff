@@ -84,6 +84,15 @@ export class ChangedFilesProvider implements vscode.WebviewViewProvider, vscode.
   private readonly _onDidChangeTarget = new vscode.EventEmitter<void>();
   readonly onDidChangeTarget = this._onDidChangeTarget.event;
 
+  /**
+   * Fires (debounced) when the target repo's git state changes underneath us
+   * (HEAD/index/refs — commit, checkout, stage, merge…). Consumers use it to
+   * drop caches whose results depend on repo state, e.g. line-blame results
+   * that change when a commit lands even though no document changed.
+   */
+  private readonly _onDidChangeGitState = new vscode.EventEmitter<void>();
+  readonly onDidChangeGitState = this._onDidChangeGitState.event;
+
   private target: PersistedTarget | undefined;
   private filter: FilterState;
   private view: vscode.WebviewView | undefined;
@@ -101,6 +110,12 @@ export class ChangedFilesProvider implements vscode.WebviewViewProvider, vscode.
   private listSeq = 0;
   private filterSeq = 0;
   private viewSubs: vscode.Disposable[] = [];
+  /** Watchers on the target repo's gitdir; recreated on every target change. */
+  private gitWatchers: vscode.Disposable[] = [];
+  /** Guards installGitWatcher against a target change racing the async gitDir lookup. */
+  private gitWatcherSeq = 0;
+  private autoRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+  private readonly saveSub: vscode.Disposable;
   /**
    * The file shown by the active gitdiff diff, or undefined when no gitdiff
    * diff is focused. Stored raw (not yet matched against the target's repo) so
@@ -119,11 +134,88 @@ export class ChangedFilesProvider implements vscode.WebviewViewProvider, vscode.
     // shapes across version bumps — sanitize before trusting.
     const persistedFilter = workspaceState.get<Partial<FilterState>>(FILTER_KEY);
     this.filter = sanitizeFilter({ ...DEFAULT_FILTER, ...(persistedFilter ?? {}) });
+    // Keep the list live: a save inside the target repo means the working
+    // tree changed, so the diff-vs-target list is stale.
+    this.saveSub = vscode.workspace.onDidSaveTextDocument((doc) => {
+      if (doc.uri.scheme === 'file' && this.isUnderTargetRepo(doc.uri.fsPath)) {
+        this.scheduleAutoRefresh(false);
+      }
+    });
+    void this.installGitWatcher();
   }
 
   dispose(): void {
+    if (this.autoRefreshTimer) clearTimeout(this.autoRefreshTimer);
+    this.saveSub.dispose();
+    for (const d of this.gitWatchers.splice(0)) d.dispose();
     for (const d of this.viewSubs.splice(0)) d.dispose();
     this._onDidChangeTarget.dispose();
+    this._onDidChangeGitState.dispose();
+  }
+
+  /**
+   * Watch the target repo's gitdir for state changes (HEAD, index, merge
+   * state, refs) so commits/checkouts/staging made outside this extension —
+   * terminal git, the built-in SCM view — refresh the list without a manual
+   * refresh. Two non-recursive watchers (gitdir root + gitdir/logs) rather
+   * than one `**` pattern: recursive watching *outside* the workspace needs a
+   * newer VS Code than our 1.85 engine floor, while non-recursive watching of
+   * outside paths has been supported for years. `logs/HEAD` is the reflog,
+   * touched by every commit/checkout/reset — the cheap "something happened"
+   * signal even when the watched top-level files are updated atomically via
+   * renames some platforms miss.
+   */
+  private async installGitWatcher(): Promise<void> {
+    const token = ++this.gitWatcherSeq;
+    for (const d of this.gitWatchers.splice(0)) d.dispose();
+    const repoRoot = this.target?.repoRoot;
+    if (!repoRoot) return;
+    let gitDir: string;
+    try {
+      gitDir = await this.git.gitDir(repoRoot);
+    } catch {
+      return; // repo vanished / git missing — auto-refresh just degrades to manual.
+    }
+    if (token !== this.gitWatcherSeq) return;
+    const subs: vscode.Disposable[] = [];
+    const onGitEvent = (): void => this.scheduleAutoRefresh(true);
+    for (const [base, glob] of [
+      [gitDir, '{HEAD,index,ORIG_HEAD,MERGE_HEAD,packed-refs}'],
+      [path.join(gitDir, 'logs'), 'HEAD'],
+    ] as const) {
+      const w = vscode.workspace.createFileSystemWatcher(
+        new vscode.RelativePattern(vscode.Uri.file(base), glob),
+      );
+      subs.push(w, w.onDidChange(onGitEvent), w.onDidCreate(onGitEvent), w.onDidDelete(onGitEvent));
+    }
+    this.gitWatchers = subs;
+  }
+
+  /** True when `fsPath` (or its canonical form) lives under the target repo. */
+  private isUnderTargetRepo(fsPath: string): boolean {
+    const root = this.target?.repoRoot;
+    if (!root) return false;
+    for (const p of [fsPath, canonicalize(fsPath)]) {
+      const rel = path.relative(root, p);
+      if (!rel.startsWith('..') && !path.isAbsolute(rel)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Debounced refresh for watcher/save events. Quiet: transient failures
+   * (mid-rebase repo states, index churn) must not spam error toasts the way
+   * a user-initiated refresh legitimately does. Skipped while the view is
+   * hidden — `onDidChangeVisibility` already refreshes on re-show.
+   */
+  private scheduleAutoRefresh(gitStateChanged: boolean): void {
+    if (gitStateChanged) this._onDidChangeGitState.fire();
+    if (this.autoRefreshTimer) clearTimeout(this.autoRefreshTimer);
+    this.autoRefreshTimer = setTimeout(() => {
+      this.autoRefreshTimer = undefined;
+      if (!this.target || !this.view?.visible) return;
+      void this.refresh({ quiet: true });
+    }, 400);
   }
 
   resolveWebviewView(view: vscode.WebviewView): void {
@@ -217,6 +309,7 @@ export class ChangedFilesProvider implements vscode.WebviewViewProvider, vscode.
     };
     await this.workspaceState.update(STATE_KEY, this.target);
     this._onDidChangeTarget.fire();
+    void this.installGitWatcher();
     await this.refresh();
   }
 
@@ -225,6 +318,7 @@ export class ChangedFilesProvider implements vscode.WebviewViewProvider, vscode.
     this.target = undefined;
     await this.workspaceState.update(STATE_KEY, undefined);
     this._onDidChangeTarget.fire();
+    void this.installGitWatcher();
     this.files = [];
     this.post({
       type: 'files',
@@ -234,7 +328,7 @@ export class ChangedFilesProvider implements vscode.WebviewViewProvider, vscode.
     });
   }
 
-  async refresh(): Promise<void> {
+  async refresh(options: { quiet?: boolean } = {}): Promise<void> {
     const token = this.invalidate();
     if (!this.target) {
       this.files = [];
@@ -242,13 +336,22 @@ export class ChangedFilesProvider implements vscode.WebviewViewProvider, vscode.
       return;
     }
     const { ref, repoRoot, display } = this.target;
-    this.post({
-      type: 'files',
-      files: [],
-      hasTarget: true,
-      targetLabel: display,
-      loading: true,
-    });
+    // Only blank the list into a "Loading…" state when there is nothing to
+    // show yet (first load / target change). Re-refreshes — especially the
+    // automatic ones on save and git activity — keep the previous rows on
+    // screen until the new list lands, instead of flashing empty. Quiet
+    // (auto) refreshes never post the spinner: their error path returns
+    // without posting anything, so a spinner posted here would have nothing
+    // to clear it and the view would be stuck on "Loading…".
+    if (this.files.length === 0 && !options.quiet) {
+      this.post({
+        type: 'files',
+        files: [],
+        hasTarget: true,
+        targetLabel: display,
+        loading: true,
+      });
+    }
     try {
       const [tracked, untracked, worktrees] = await Promise.all([
         this.git.listChangedPaths(repoRoot, ref),
@@ -278,6 +381,11 @@ export class ChangedFilesProvider implements vscode.WebviewViewProvider, vscode.
       await this.applyFilter();
     } catch (err) {
       if (token !== this.listSeq) return;
+      if (options.quiet) {
+        // Auto-refresh hit a transient repo state (mid-rebase, lock churn):
+        // keep the last good list on screen and let the next event retry.
+        return;
+      }
       void vscode.window.showErrorMessage(
         `GitDiff: failed to list changes: ${err instanceof Error ? err.message : String(err)}`,
       );

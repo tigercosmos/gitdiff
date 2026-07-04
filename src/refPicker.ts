@@ -79,18 +79,131 @@ export class RefPicker {
     return runCommitQuickPick(this.git, repoRoot, relPath, initialLimit);
   }
 
-  /** Picker for the "Change Target" command — branches first, then commits. */
+  /**
+   * Picker for the "Change Target" / "Set Comparison Target" commands.
+   * Offers the Branch…/Commit… sub-pickers, but also lets the user just type
+   * a revision — branch, tag, SHA, `HEAD~2`, anything `git rev-parse`
+   * understands — and accept it directly without choosing a category first.
+   */
   async pickAny(fileUri: vscode.Uri): Promise<PickedRef | undefined> {
-    const choice = await vscode.window.showQuickPick(
-      [
-        { label: '$(git-branch) Branch…', value: 'branch' as const },
-        { label: '$(git-commit) Commit…', value: 'commit' as const },
-      ],
-      { title: 'Change Target', placeHolder: 'Pick a target type' },
-    );
-    if (!choice) return undefined;
-    return choice.value === 'branch' ? this.pickBranch(fileUri) : this.pickCommit(fileUri);
+    const selection = await runTargetChooser();
+    if (!selection) return undefined;
+    if (selection.choice === 'branch') return this.pickBranch(fileUri);
+    if (selection.choice === 'commit') return this.pickCommit(fileUri);
+    if (selection.typed) return this.resolveTypedTarget(fileUri, selection.typed);
+    return undefined;
   }
+
+  /**
+   * Resolve free-typed text to a comparison target. Verification is the same
+   * `rev-parse --verify <text>^{commit}` used everywhere else, so it accepts
+   * whatever git does. If the text names an existing branch (local or
+   * remote-tracking) the result carries `branch:` so refresh keeps tracking
+   * the tip; tags, SHAs, and relative revisions stay pinned.
+   */
+  private async resolveTypedTarget(
+    fileUri: vscode.Uri,
+    typed: string,
+  ): Promise<PickedRef | undefined> {
+    let repoRoot: string;
+    try {
+      repoRoot = await this.git.repoRoot(fileUri.fsPath);
+    } catch {
+      void vscode.window.showErrorMessage('GitDiff: Not a git repository.');
+      return undefined;
+    }
+    let full: string;
+    try {
+      full = await this.git.verifyRef(repoRoot, typed);
+    } catch (err) {
+      void vscode.window.showErrorMessage(
+        err instanceof Error ? err.message : `GitDiff: invalid revision '${typed}'`,
+      );
+      return undefined;
+    }
+    const isBranch = await this.git.isBranch(repoRoot, typed).catch(() => false);
+    if (isBranch) {
+      return { ref: full, display: typed, branch: typed };
+    }
+    // A SHA prefix reads better shortened from the *full* SHA; any other
+    // revision (tag, HEAD~2, …) is most recognizable as what the user typed.
+    const display =
+      SHA_PREFIX_RE.test(typed) && full.toLowerCase().startsWith(typed.toLowerCase())
+        ? shortenSha(full)
+        : typed;
+    return { ref: full, display };
+  }
+}
+
+export interface TargetChoiceItem extends vscode.QuickPickItem {
+  /** Set for the fixed Branch…/Commit… rows. */
+  choice?: 'branch' | 'commit';
+  /** Set for the synthesized "compare with what you typed" row. */
+  typed?: string;
+}
+
+/**
+ * Items for the target chooser. Pure — exported for unit tests. When the user
+ * has typed something, a "Compare with <typed>" row is synthesized at the top
+ * (leading-`-` input is excluded up front: it could be misparsed as an option
+ * by downstream git calls, and verifyRef would reject it anyway).
+ */
+export function buildTargetChoiceItems(typedRaw: string): TargetChoiceItem[] {
+  const items: TargetChoiceItem[] = [];
+  const typed = typedRaw.trim();
+  if (typed && !typed.startsWith('-')) {
+    items.push({
+      label: `$(arrow-right) Compare with '${typed}'`,
+      description: 'branch, tag, or commit — verify and use',
+      typed,
+      alwaysShow: true,
+    });
+  }
+  items.push(
+    {
+      label: '$(git-branch) Branch…',
+      description: 'pick from the branch list',
+      choice: 'branch',
+      alwaysShow: true,
+    },
+    {
+      label: '$(git-commit) Commit…',
+      description: 'pick from recent commits',
+      choice: 'commit',
+      alwaysShow: true,
+    },
+  );
+  return items;
+}
+
+/**
+ * Drive the chooser with `createQuickPick` (not `showQuickPick`) so typing
+ * can synthesize the direct-compare row live.
+ */
+function runTargetChooser(): Promise<TargetChoiceItem | undefined> {
+  return new Promise<TargetChoiceItem | undefined>((resolve) => {
+    const qp = vscode.window.createQuickPick<TargetChoiceItem>();
+    qp.title = 'Change Target';
+    qp.placeholder = 'Pick a target type, or type a branch, tag, or commit directly';
+    let done = false;
+    const finish = (result: TargetChoiceItem | undefined): void => {
+      if (done) return;
+      done = true;
+      qp.hide();
+      qp.dispose();
+      resolve(result);
+    };
+    qp.items = buildTargetChoiceItems('');
+    qp.onDidChangeValue((value) => {
+      qp.items = buildTargetChoiceItems(value);
+    });
+    qp.onDidAccept(() => {
+      const picked = qp.activeItems[0];
+      if (picked) finish(picked);
+    });
+    qp.onDidHide(() => finish(undefined));
+    qp.show();
+  });
 }
 
 function shortenSha(sha: string): string {

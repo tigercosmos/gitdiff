@@ -45,6 +45,12 @@ export function activate(context: vscode.ExtensionContext): GitDiffExports {
   context.subscriptions.push(
     changedFiles,
     changedFiles.onDidChangeTarget(syncHasTargetContext),
+    // Commit/checkout detected by the sidebar's repo watcher: blame results
+    // for unchanged buffers may now differ — drop the blame caches.
+    changedFiles.onDidChangeGitState(() => {
+      lineBlame.handleGitStateChange();
+      blameHoverProvider.handleGitStateChange();
+    }),
     // Highlight the row in the Changed Files view for whatever diff is focused.
     tracker.onDidChangeActiveFile((file) => changedFiles.setActiveFile(file)),
     vscode.window.registerWebviewViewProvider(VIEW_ID, changedFiles, {
@@ -111,9 +117,11 @@ export function activate(context: vscode.ExtensionContext): GitDiffExports {
     // alter what `git` resolves to (e.g., gitdiff.gitPath).
     vscode.workspace.onDidChangeConfiguration(async (e) => {
       if (!e.affectsConfiguration('gitdiff')) return;
-      for (const { uri, tab } of openGitdiffTabs()) {
-        await refreshOrCloseUnsupported(git, provider, uri, tab, opener);
-      }
+      await Promise.all(
+        [...openGitdiffTabs()].map(({ uri, tab }) =>
+          refreshOrCloseUnsupported(git, provider, uri, tab, opener),
+        ),
+      );
       changedFiles.refresh();
     }),
 
@@ -208,11 +216,11 @@ export function activate(context: vscode.ExtensionContext): GitDiffExports {
   // need a re-render now that the provider is registered. If the blob has
   // changed kind to binary/non-UTF-8 since the diff was first opened, close
   // it rather than show misleading content.
-  void (async () => {
-    for (const { uri, tab } of openGitdiffTabs()) {
-      await refreshOrCloseUnsupported(git, provider, uri, tab);
-    }
-  })();
+  void Promise.all(
+    [...openGitdiffTabs()].map(({ uri, tab }) =>
+      refreshOrCloseUnsupported(git, provider, uri, tab).catch(() => {}),
+    ),
+  );
 
   return { changedFiles, lineBlame };
 }

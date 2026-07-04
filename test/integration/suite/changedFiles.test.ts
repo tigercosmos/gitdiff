@@ -2,7 +2,16 @@ import * as assert from 'assert';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { commit, git, makeRepo, realRepoPath, settle, withWarningResponse } from './helpers';
+import {
+  captureMessages,
+  commit,
+  git,
+  makeRepo,
+  realRepoPath,
+  settle,
+  withTypedQuickPick,
+  withWarningResponse,
+} from './helpers';
 import { filterFiles } from '../../../src/changedFilesProvider';
 import type { GitDiffExports } from '../../../src/extension';
 
@@ -377,5 +386,146 @@ describe('changedFiles provider (e2e)', function () {
     assert.ok(!api.changedFiles.getAllFiles().some((f) => f.relPath === 'gone.ts'));
 
     await api.changedFiles.clearTarget();
+  });
+});
+
+describe('Typed target — free text in the target chooser (e2e)', function () {
+  this.timeout(30000);
+
+  /** Repo with two commits, a feature branch, and a tag; a.txt modified in WT. */
+  function makeTypedRepo(): { root: string; firstSha: string; headSha: string } {
+    const root = makeRepo();
+    fs.writeFileSync(path.join(root, 'a.txt'), 'v1\n');
+    commit(root, 'v1');
+    const firstSha = git(root, ['rev-parse', 'HEAD']).trim();
+    fs.writeFileSync(path.join(root, 'a.txt'), 'v2\n');
+    commit(root, 'v2');
+    const headSha = git(root, ['rev-parse', 'HEAD']).trim();
+    git(root, ['branch', 'feature/typed']);
+    git(root, ['tag', 'v9.9', firstSha]);
+    fs.writeFileSync(path.join(root, 'a.txt'), 'WT\n');
+    return { root, firstSha, headSha };
+  }
+
+  async function setTargetByTyping(root: string, typed: string): Promise<void> {
+    await vscode.window.showTextDocument(vscode.Uri.file(path.join(root, 'a.txt')));
+    await withTypedQuickPick(
+      typed,
+      (i) => i.typed === typed,
+      () => vscode.commands.executeCommand('gitdiff.changedFiles.setTarget'),
+    );
+    await settle();
+  }
+
+  it('typing a branch name resolves it AND keeps branch (tip-tracking) semantics', async () => {
+    const api = await getApi();
+    const { root, headSha } = makeTypedRepo();
+    await setTargetByTyping(root, 'feature/typed');
+
+    const target = api.changedFiles.getCurrentTarget();
+    assert.ok(target, 'expected a target to be set');
+    assert.strictEqual(target!.display, 'feature/typed');
+    assert.strictEqual(target!.branch, 'feature/typed');
+    assert.strictEqual(target!.ref, headSha);
+    // And the sidebar list is actually built against it.
+    assert.ok(api.changedFiles.getAllFiles().some((f) => f.relPath === 'a.txt'));
+    await api.changedFiles.clearTarget();
+  });
+
+  it('typing a short SHA pins the target to the full SHA (no branch semantics)', async () => {
+    const api = await getApi();
+    const { root, firstSha } = makeTypedRepo();
+    await setTargetByTyping(root, firstSha.slice(0, 8));
+
+    const target = api.changedFiles.getCurrentTarget();
+    assert.ok(target);
+    assert.strictEqual(target!.ref, firstSha);
+    assert.strictEqual(target!.branch, undefined);
+    assert.strictEqual(target!.display, firstSha.slice(0, 8));
+    await api.changedFiles.clearTarget();
+  });
+
+  it('typing a tag resolves to its commit, displays the tag name, and stays pinned', async () => {
+    const api = await getApi();
+    const { root, firstSha } = makeTypedRepo();
+    await setTargetByTyping(root, 'v9.9');
+
+    const target = api.changedFiles.getCurrentTarget();
+    assert.ok(target);
+    assert.strictEqual(target!.ref, firstSha);
+    assert.strictEqual(target!.display, 'v9.9');
+    assert.strictEqual(target!.branch, undefined);
+    await api.changedFiles.clearTarget();
+  });
+
+  it('typing a relative revision like HEAD~1 works and stays pinned', async () => {
+    const api = await getApi();
+    const { root, firstSha } = makeTypedRepo();
+    await setTargetByTyping(root, 'HEAD~1');
+
+    const target = api.changedFiles.getCurrentTarget();
+    assert.ok(target);
+    assert.strictEqual(target!.ref, firstSha);
+    assert.strictEqual(target!.display, 'HEAD~1');
+    assert.strictEqual(target!.branch, undefined);
+    await api.changedFiles.clearTarget();
+  });
+
+  it('typing an unresolvable revision shows an error and leaves the target unchanged', async () => {
+    const api = await getApi();
+    const { root, headSha } = makeTypedRepo();
+    // Seed a known-good target so we can prove the failed attempt didn't clobber it.
+    await api.changedFiles.setTarget(
+      { ref: headSha, display: 'sentinel' },
+      realRepoPath(root),
+    );
+    await settle(50);
+
+    const cap = captureMessages();
+    try {
+      await setTargetByTyping(root, 'no-such-revision-xyz');
+    } finally {
+      cap.restore();
+    }
+    assert.ok(
+      cap.errors.some((e) => e.includes('no-such-revision-xyz')),
+      `expected an invalid-revision error, got ${JSON.stringify(cap.errors)}`,
+    );
+    assert.strictEqual(api.changedFiles.getCurrentTarget()?.display, 'sentinel');
+    await api.changedFiles.clearTarget();
+  });
+});
+
+describe('Auto-refresh — gitdir watcher (e2e)', function () {
+  this.timeout(30000);
+
+  it('an external commit fires onDidChangeGitState', async () => {
+    const api = await getApi();
+    const root = makeRepo();
+    fs.writeFileSync(path.join(root, 'w.txt'), 'v1\n');
+    commit(root, 'v1');
+    const full = git(root, ['rev-parse', 'HEAD']).trim();
+    await api.changedFiles.setTarget({ ref: full, display: 'watch' }, realRepoPath(root));
+
+    // The watcher installs asynchronously (a gitDir lookup runs first), and
+    // filesystem events have platform-dependent latency — poke the repo in
+    // rounds rather than sleeping one fixed guess.
+    let fired = false;
+    const sub = api.changedFiles.onDidChangeGitState(() => {
+      fired = true;
+    });
+    try {
+      for (let round = 0; round < 4 && !fired; round++) {
+        git(root, ['commit', '--allow-empty', '-m', `tick-${round}`, '-q']);
+        const deadline = Date.now() + 2500;
+        while (!fired && Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 100));
+        }
+      }
+      assert.ok(fired, 'expected a git-state event after external commits');
+    } finally {
+      sub.dispose();
+      await api.changedFiles.clearTarget();
+    }
   });
 });

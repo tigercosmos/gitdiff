@@ -16,19 +16,24 @@
     "changed files",
     "merge"
   ],
-  "version": "0.7.1",
+  "version": "0.8.0",
   "publisher": "tigercosmos",
   "icon": "icons/activity.png",
   "engines": {
     "vscode": "^1.85.0"
   },
-  "categories": ["SCM Providers", "Other"],
+  "categories": [
+    "SCM Providers",
+    "Other"
+  ],
   "repository": {
     "type": "git",
     "url": "https://github.com/tigercosmos/gitdiff.git"
   },
-  "main": "./out/src/extension.js",
-  "activationEvents": ["onStartupFinished"],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "capabilities": {
     "virtualWorkspaces": false,
     "untrustedWorkspaces": {
@@ -201,16 +206,16 @@
     }
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
+    "vscode:prepublish": "npm run lint && npm run bundle",
+    "bundle": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --platform=node --format=cjs --target=node18 --minify --sourcemap",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "test": "node ./out/test/integration/runTest.js",
+    "test": "npm run bundle && node ./out/test/integration/runTest.js",
     "test:unit": "mocha --require ts-node/register 'test/unit/**/*.test.ts'",
     "package": "vsce package",
-    "lint": "tsc --noEmit"
-  },
-  "dependencies": {
-    "minimatch": "^3.1.5"
+    "lint": "tsc --noEmit",
+    "bundle:dev": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --platform=node --format=cjs --target=node18 --sourcemap",
+    "build:dev": "npm run compile && npm run bundle:dev"
   },
   "devDependencies": {
     "@types/minimatch": "^3.0.5",
@@ -219,8 +224,10 @@
     "@types/vscode": "^1.85.0",
     "@vscode/test-electron": "^2.3.9",
     "@vscode/vsce": "^2.24.0",
+    "esbuild": "^0.28.1",
     "mocha": "^10.3.0",
     "ts-node": "^10.9.2",
-    "typescript": "^5.4.0"
+    "typescript": "^5.4.0",
+    "minimatch": "^3.1.5"
   }
 }
