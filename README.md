@@ -61,7 +61,7 @@ ext install tigercosmos.gitdiff
 **From a `.vsix`**
 
 ```bash
-code --install-extension gitdiff-0.7.1.vsix
+code --install-extension gitdiff-0.8.1.vsix
 ```
 
 ## Usage
