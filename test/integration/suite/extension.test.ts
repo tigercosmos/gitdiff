@@ -1148,6 +1148,69 @@ describe('gitdiff e2e', function () {
       assert.ok(stored.startsWith(initialSha));
     });
 
+    it('offers the latest 3 commits of the current branch as one-click rows', async () => {
+      const root = makeRepo();
+      const filePath = path.join(root, 'a.txt');
+      // Four commits: only the newest three may appear as shortcut rows.
+      fs.writeFileSync(filePath, 'v1\n');
+      const shaOldest = commit(root, 'c1');
+      fs.writeFileSync(filePath, 'v2\n');
+      const shaThird = commit(root, 'c2');
+      fs.writeFileSync(filePath, 'v3\n');
+      commit(root, 'c3');
+      fs.writeFileSync(filePath, 'v4\n');
+      commit(root, 'c4');
+      fs.writeFileSync(filePath, 'working tree\n');
+
+      await vscode.window.showTextDocument(vscode.Uri.file(filePath));
+
+      // Pick the *last* of the three recent rows (c2). `find` visits every
+      // earlier row on the way, so `seen` proves what the chooser offers.
+      const seen: any[] = [];
+      await withQuickPickQueue(
+        [
+          (i) => {
+            seen.push(i);
+            return typeof i.ref === 'string' && i.ref.startsWith(shaThird);
+          },
+        ],
+        () => vscode.commands.executeCommand('gitdiff.changedFiles.setTarget'),
+      );
+      await settle();
+
+      // The chooser keeps its fixed rows, adds a separator, and lists exactly
+      // the three newest commits — never the fourth.
+      assert.ok(
+        seen.some((i) => i.choice === 'branch') && seen.some((i) => i.choice === 'commit'),
+        'Branch…/Commit… rows must still come first',
+      );
+      assert.ok(
+        seen.some((i) => i.label === 'Recent commits' && i.kind !== undefined),
+        'a "Recent commits" separator precedes the shortcut rows',
+      );
+      const commitRows = seen.filter((i) => typeof i.ref === 'string');
+      assert.strictEqual(commitRows.length, 3, 'exactly three recent-commit rows');
+      assert.ok(
+        commitRows.every((i) => !i.ref.startsWith(shaOldest)),
+        'the 4th-newest commit is not offered',
+      );
+
+      // Picking a recent row sets the target directly — no sub-picker needed.
+      await vscode.commands.executeCommand('gitdiff.changedFiles.openFile', {
+        relPath: 'a.txt',
+        absPath: filePath,
+        status: 'M',
+      });
+      await settle();
+      const tab = vscode.window.tabGroups.activeTabGroup.activeTab!;
+      assert.ok(tab.input instanceof vscode.TabInputTextDiff);
+      const stored = new URLSearchParams(
+        (tab.input as vscode.TabInputTextDiff).original.query,
+      ).get('ref')!;
+      assert.match(stored, /^[0-9a-f]{40}$/);
+      assert.ok(stored.startsWith(shaThird), `expected target ${shaThird}, got ${stored}`);
+    });
+
     it('persists the chosen target across calls (workspaceState round-trip)', async () => {
       // Verify persistence indirectly: setTarget then openFile uses the
       // persisted target without re-prompting.

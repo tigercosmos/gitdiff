@@ -30,6 +30,11 @@ export const window = {
   },
 };
 
+export enum QuickPickItemKind {
+  Separator = -1,
+  Default = 0,
+}
+
 export class EventEmitter<T> {
   private listeners: Array<(e: T) => void> = [];
   readonly event = (cb: (e: T) => void) => {

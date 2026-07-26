@@ -81,17 +81,36 @@ export class RefPicker {
 
   /**
    * Picker for the "Change Target" / "Set Comparison Target" commands.
-   * Offers the Branch…/Commit… sub-pickers, but also lets the user just type
-   * a revision — branch, tag, SHA, `HEAD~2`, anything `git rev-parse`
+   * Offers the Branch…/Commit… sub-pickers plus one-click rows for the newest
+   * few commits on the current branch, but also lets the user just type a
+   * revision — branch, tag, SHA, `HEAD~2`, anything `git rev-parse`
    * understands — and accept it directly without choosing a category first.
    */
   async pickAny(fileUri: vscode.Uri): Promise<PickedRef | undefined> {
-    const selection = await runTargetChooser();
+    const selection = await runTargetChooser(this.loadRecentCommits(fileUri));
     if (!selection) return undefined;
     if (selection.choice === 'branch') return this.pickBranch(fileUri);
     if (selection.choice === 'commit') return this.pickCommit(fileUri);
+    if (selection.ref) {
+      return { ref: selection.ref, display: selection.shortSha ?? shortenSha(selection.ref) };
+    }
     if (selection.typed) return this.resolveTypedTarget(fileUri, selection.typed);
     return undefined;
+  }
+
+  /**
+   * Newest commits on the current branch (HEAD), unfiltered by path — these
+   * become the shortcut rows in the chooser. Failures (not a repo, empty repo)
+   * are swallowed: the chooser is still useful without them, and the
+   * Branch…/Commit… sub-pickers report the real error if the user goes there.
+   */
+  private async loadRecentCommits(fileUri: vscode.Uri): Promise<CommitInfo[]> {
+    try {
+      const repoRoot = await this.git.repoRoot(fileUri.fsPath);
+      return await this.git.listCommits(repoRoot, RECENT_COMMIT_COUNT);
+    } catch {
+      return [];
+    }
   }
 
   /**
@@ -140,15 +159,28 @@ export interface TargetChoiceItem extends vscode.QuickPickItem {
   choice?: 'branch' | 'commit';
   /** Set for the synthesized "compare with what you typed" row. */
   typed?: string;
+  /** Full 40-char SHA — set for the recent-commit shortcut rows. */
+  ref?: string;
+  /** Short SHA of a recent-commit row — used for the diff tab title. */
+  shortSha?: string;
 }
+
+/** How many recent commits get their own row in the target chooser. */
+export const RECENT_COMMIT_COUNT = 3;
 
 /**
  * Items for the target chooser. Pure — exported for unit tests. When the user
  * has typed something, a "Compare with <typed>" row is synthesized at the top
  * (leading-`-` input is excluded up front: it could be misparsed as an option
- * by downstream git calls, and verifyRef would reject it anyway).
+ * by downstream git calls, and verifyRef would reject it anyway). `recent`
+ * holds the newest commits on the current branch; they get shortcut rows below
+ * Branch…/Commit… so the common "diff against the last commit" case is one
+ * click instead of two.
  */
-export function buildTargetChoiceItems(typedRaw: string): TargetChoiceItem[] {
+export function buildTargetChoiceItems(
+  typedRaw: string,
+  recent: CommitInfo[] = [],
+): TargetChoiceItem[] {
   const items: TargetChoiceItem[] = [];
   const typed = typedRaw.trim();
   if (typed && !typed.startsWith('-')) {
@@ -173,18 +205,35 @@ export function buildTargetChoiceItems(typedRaw: string): TargetChoiceItem[] {
       alwaysShow: true,
     },
   );
+  if (recent.length > 0) {
+    items.push({ label: 'Recent commits', kind: vscode.QuickPickItemKind.Separator });
+    for (const c of recent) {
+      const { label, description, detail } = commitItem(c);
+      items.push({ label, description, detail, ref: c.fullSha, shortSha: c.shortSha });
+    }
+  }
   return items;
 }
 
 /**
  * Drive the chooser with `createQuickPick` (not `showQuickPick`) so typing
- * can synthesize the direct-compare row live.
+ * can synthesize the direct-compare row live. The recent-commit rows arrive
+ * asynchronously: the chooser shows immediately with the fixed rows and folds
+ * them in when `recent` resolves, so a slow `git log` never delays the UI.
  */
-function runTargetChooser(): Promise<TargetChoiceItem | undefined> {
+function runTargetChooser(
+  recent: Promise<CommitInfo[]>,
+): Promise<TargetChoiceItem | undefined> {
   return new Promise<TargetChoiceItem | undefined>((resolve) => {
     const qp = vscode.window.createQuickPick<TargetChoiceItem>();
     qp.title = 'Change Target';
     qp.placeholder = 'Pick a target type, or type a branch, tag, or commit directly';
+    // Recent-commit rows carry the SHA in `detail` and the age in
+    // `description`; match on both so typing a hash finds them.
+    qp.matchOnDescription = true;
+    qp.matchOnDetail = true;
+    qp.busy = true;
+    let commits: CommitInfo[] = [];
     let done = false;
     const finish = (result: TargetChoiceItem | undefined): void => {
       if (done) return;
@@ -193,9 +242,9 @@ function runTargetChooser(): Promise<TargetChoiceItem | undefined> {
       qp.dispose();
       resolve(result);
     };
-    qp.items = buildTargetChoiceItems('');
+    qp.items = buildTargetChoiceItems('', commits);
     qp.onDidChangeValue((value) => {
-      qp.items = buildTargetChoiceItems(value);
+      qp.items = buildTargetChoiceItems(value, commits);
     });
     qp.onDidAccept(() => {
       const picked = qp.activeItems[0];
@@ -203,6 +252,12 @@ function runTargetChooser(): Promise<TargetChoiceItem | undefined> {
     });
     qp.onDidHide(() => finish(undefined));
     qp.show();
+    void recent.then((loaded) => {
+      if (done) return;
+      commits = loaded;
+      qp.items = buildTargetChoiceItems(qp.value, commits);
+      qp.busy = false;
+    });
   });
 }
 

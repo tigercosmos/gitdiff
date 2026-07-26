@@ -35,6 +35,7 @@ GitDiff does exactly that — and unlike a read-only `git diff`, **the working-t
 
 - **Compare against any branch** — local or remote-tracking, with a quick-pick search.
 - **Compare against any commit** — recent commits in a picker, plus a free-form "Enter SHA…" option.
+- **Latest commits, one click away** — the target chooser lists the 3 newest commits on the current branch (short SHA, subject, author, age) right below the **Branch…** / **Commit…** rows, so "diff against my last commit" no longer means walking into a submenu.
 - **Type a target directly** — in the target chooser ("Change Target…" / "Set Comparison Target…"), skip the Branch/Commit submenus and just type any revision — a branch, tag, SHA, or expression like `HEAD~2` — and pick **Compare with '…'**. Branch names keep tip-tracking semantics; everything else is pinned to the resolved commit.
 - **Editable right pane** — it's the real file on disk. Edit and save like any normal editor.
 - **Read-only left pane** — backed by `git show <ref>:<path>`, so you can't accidentally clobber history.
@@ -61,7 +62,7 @@ ext install tigercosmos.gitdiff
 **From a `.vsix`**
 
 ```bash
-code --install-extension gitdiff-0.8.1.vsix
+code --install-extension gitdiff-0.9.0.vsix
 ```
 
 ## Usage
@@ -81,7 +82,7 @@ Hover over any line in the diff to see the last commit that touched it — autho
 ### Browse every changed file
 
 1. Click the **GitDiff** icon in the Activity Bar.
-2. Hit **Set Comparison Target…** in the view's title.
+2. Hit **Set Comparison Target…** in the view's title. The chooser offers **Branch…**, **Commit…**, the **3 newest commits on the current branch** as one-click rows, and free-form typing of any revision.
 3. Click any file in the list to open its diff against your chosen target.
 4. Narrow the list with the **Search** box (toggle match-case / whole-word / regex on the right) and the **files to include** / **files to exclude** glob inputs — same comma-separated syntax as VS Code's Search panel (`*.ts`, `src/`, `**/*.test.ts`, `*.{ts,tsx}`). Filter state is remembered per workspace.
 5. Hover a row and click the **↺ Revert** button on the right to discard that file's changes and restore it to the target (a confirmation prompt guards the discard).

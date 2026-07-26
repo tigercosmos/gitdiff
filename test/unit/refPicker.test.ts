@@ -62,4 +62,76 @@ describe('buildTargetChoiceItems', () => {
       assert.strictEqual(items[0].typed, rev);
     }
   });
+
+  describe('recent-commit rows', () => {
+    const commits = [
+      {
+        fullSha: 'a'.repeat(40),
+        shortSha: 'aaaaaaa',
+        subject: 'newest change',
+        isoDate: new Date().toISOString(),
+        author: 'Ada',
+      },
+      {
+        fullSha: 'b'.repeat(40),
+        shortSha: 'bbbbbbb',
+        subject: 'middle change',
+        isoDate: new Date().toISOString(),
+        author: 'Bob',
+      },
+      {
+        fullSha: 'c'.repeat(40),
+        shortSha: 'ccccccc',
+        subject: 'oldest change',
+        isoDate: new Date().toISOString(),
+        author: 'Cy',
+      },
+    ];
+
+    it('appends a separator plus one row per commit after Branch…/Commit…', () => {
+      const items = buildTargetChoiceItems('', commits);
+      assert.strictEqual(items.length, 6);
+      assert.deepStrictEqual(
+        items.slice(0, 2).map((i: any) => i.choice),
+        ['branch', 'commit'],
+      );
+      assert.strictEqual(items[2].kind, -1, 'separator row');
+      assert.strictEqual(items[2].label, 'Recent commits');
+      assert.deepStrictEqual(
+        items.slice(3).map((i: any) => i.ref),
+        commits.map((c) => c.fullSha),
+      );
+      assert.deepStrictEqual(
+        items.slice(3).map((i: any) => i.shortSha),
+        commits.map((c) => c.shortSha),
+      );
+    });
+
+    it('keeps commit order and shows sha, subject, author and full sha', () => {
+      const items = buildTargetChoiceItems('', commits);
+      const first = items[3];
+      assert.ok(first.label.includes('aaaaaaa'));
+      assert.ok(first.label.includes('newest change'));
+      assert.ok(first.detail.includes('Ada'));
+      assert.ok(first.detail.includes('a'.repeat(40)), 'full sha in detail for filtering');
+      assert.strictEqual(first.choice, undefined);
+      assert.strictEqual(first.typed, undefined);
+    });
+
+    it('places recent rows after the typed row and the fixed rows', () => {
+      const items = buildTargetChoiceItems('v2.0', commits);
+      assert.strictEqual(items[0].typed, 'v2.0');
+      assert.deepStrictEqual(
+        items.slice(1, 3).map((i: any) => i.choice),
+        ['branch', 'commit'],
+      );
+      assert.strictEqual(items[3].kind, -1);
+      assert.strictEqual(items[4].ref, 'a'.repeat(40));
+    });
+
+    it('omits the separator when there are no commits', () => {
+      assert.strictEqual(buildTargetChoiceItems('', []).length, 2);
+      assert.strictEqual(buildTargetChoiceItems('').length, 2);
+    });
+  });
 });
