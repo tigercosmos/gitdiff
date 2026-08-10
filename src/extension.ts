@@ -283,11 +283,29 @@ function pickRef(mode: Mode, picker: RefPicker, fileUri: vscode.Uri) {
   }
 }
 
-function pickAnyWorkspaceFileUri(): vscode.Uri | undefined {
-  const active = vscode.window.activeTextEditor?.document.uri;
-  if (active && active.scheme === 'file') return active;
+/**
+ * A path to resolve the repo from when the user didn't name a file (the
+ * sidebar's Set Target). The active editor is preferred — it's what the user
+ * is looking at — but only when it lives inside an open workspace folder.
+ * A window opened on a linked worktree routinely has files from the *parent*
+ * repo open (worktrees are commonly created under it, e.g.
+ * `<repo>/.claude/worktrees/<name>`), and resolving from such a file pins the
+ * sidebar to the parent repo — silently listing that repo's changes instead
+ * of the worktree's. Falling back to the workspace folder keeps the sidebar
+ * on the repo the window is actually open on.
+ *
+ * Exported for unit tests only.
+ */
+export function pickAnyWorkspaceFileUri(): vscode.Uri | undefined {
   const folder = vscode.workspace.workspaceFolders?.[0];
-  return folder?.uri.scheme === 'file' ? folder.uri : undefined;
+  const folderUri = folder?.uri.scheme === 'file' ? folder.uri : undefined;
+  const active = vscode.window.activeTextEditor?.document.uri;
+  if (active && active.scheme === 'file') {
+    // No workspace folder to fall back to (a loose file window): the active
+    // file is the only thing we can resolve from.
+    if (!folderUri || vscode.workspace.getWorkspaceFolder(active)) return active;
+  }
+  return folderUri;
 }
 
 function* openGitdiffTabs(): Generator<{ uri: vscode.Uri; tab: vscode.Tab }> {

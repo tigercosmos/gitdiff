@@ -2,6 +2,12 @@
 // the API surface than just `workspace.getConfiguration`. We export only what
 // changedFilesProvider needs to be `require()`d — without instantiating its
 // class, no EventEmitter etc. are actually constructed at module load.
+export interface StubWorkspaceFolder {
+  uri: Uri;
+  name: string;
+  index: number;
+}
+
 export const workspace = {
   getConfiguration(_section?: string) {
     return {
@@ -10,7 +16,39 @@ export const workspace = {
       },
     };
   },
+  /** Tests assign this; VS Code leaves it undefined when no folder is open. */
+  workspaceFolders: undefined as StubWorkspaceFolder[] | undefined,
+  /**
+   * Mirrors VS Code: the open folder that contains `uri`, or undefined when
+   * the resource lives outside every folder. Containment is by path prefix,
+   * with a folder counting as containing itself.
+   */
+  getWorkspaceFolder(uri: Uri): StubWorkspaceFolder | undefined {
+    return (workspace.workspaceFolders ?? []).find((f) => {
+      const root = f.uri.fsPath.replace(/\/+$/, '');
+      return uri.fsPath === root || uri.fsPath.startsWith(root + '/');
+    });
+  },
+  onDidSaveTextDocument(_cb: (doc: unknown) => void) {
+    return { dispose() {} };
+  },
+  createFileSystemWatcher(_pattern: unknown) {
+    const sub = () => ({ dispose() {} });
+    return {
+      onDidChange: sub,
+      onDidCreate: sub,
+      onDidDelete: sub,
+      dispose() {},
+    };
+  },
 };
+
+export class RelativePattern {
+  constructor(
+    readonly base: Uri,
+    readonly pattern: string,
+  ) {}
+}
 
 export const commands = {
   async executeCommand(_command: string, ..._args: unknown[]): Promise<unknown> {
@@ -19,6 +57,8 @@ export const commands = {
 };
 
 export const window = {
+  /** Tests assign this; VS Code leaves it undefined when no editor is focused. */
+  activeTextEditor: undefined as { document: { uri: Uri } } | undefined,
   showErrorMessage(_msg: string) {
     return Promise.resolve(undefined);
   },

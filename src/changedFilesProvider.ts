@@ -56,6 +56,15 @@ interface FilesMessage {
   searchError?: string;
   /** relPath of the file shown by the active gitdiff diff, if any. */
   activeRelPath?: string;
+  /**
+   * Basename of the target's repo root, shown next to the target label. The
+   * target carries its own repoRoot, which need not be the repo the window is
+   * open on (comparing a file from another repo/worktree re-points it), so
+   * naming the repo keeps a cross-repo list from looking like this repo's.
+   */
+  repoLabel?: string;
+  /** Absolute repo root — the repo label's tooltip. */
+  repoPath?: string;
 }
 
 interface InitMessage {
@@ -483,10 +492,19 @@ export class ChangedFilesProvider implements vscode.WebviewViewProvider, vscode.
     // rebuilds (refresh/filter) — and so a target change re-evaluates which
     // row (if any) matches — without a separate round-trip.
     const active = this.effectiveActiveRelPath();
-    const out: OutgoingMessage =
-      msg.type === 'files' && active !== undefined
-        ? { ...msg, activeRelPath: active }
-        : msg;
+    let out: OutgoingMessage = msg;
+    if (msg.type === 'files') {
+      const extra: Partial<FilesMessage> = {};
+      if (active !== undefined) extra.activeRelPath = active;
+      if (this.target) {
+        const root = this.target.repoRoot;
+        // basename('/') is '' — fall back to the root itself so the label is
+        // never blank.
+        extra.repoLabel = path.basename(root) || root;
+        extra.repoPath = root;
+      }
+      out = { ...msg, ...extra };
+    }
     void this.view.webview.postMessage(out);
   }
 }
@@ -658,7 +676,8 @@ function makeNonce(): string {
   return randomBytes(24).toString('base64');
 }
 
-function renderHtml(webview: vscode.Webview): string {
+/** Exported for unit tests, which execute the inlined script against a fake DOM. */
+export function renderHtml(webview: vscode.Webview): string {
   const nonce = makeNonce();
   const csp = [
     "default-src 'none'",
@@ -739,6 +758,7 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.target-repo { opacity: 0.75; }
 .set-target-btn, .clear-target-btn {
   appearance: none;
   background: var(--vscode-button-background);
@@ -1010,10 +1030,20 @@ body {
     const loading = !!payload.loading;
     const files = payload.files || [];
 
-    $('target-bar').textContent = hasTarget && payload.targetLabel
+    // Built from text nodes rather than innerHTML: repo paths are arbitrary
+    // filesystem strings and must never be parsed as markup.
+    const bar = $('target-bar');
+    bar.textContent = hasTarget && payload.targetLabel
       ? 'Comparing vs ' + payload.targetLabel
       : '';
-    $('target-bar').style.display = hasTarget && payload.targetLabel ? '' : 'none';
+    if (hasTarget && payload.targetLabel && payload.repoLabel) {
+      const repo = document.createElement('span');
+      repo.className = 'target-repo';
+      repo.textContent = ' in ' + payload.repoLabel;
+      repo.title = payload.repoPath || payload.repoLabel;
+      bar.appendChild(repo);
+    }
+    bar.style.display = hasTarget && payload.targetLabel ? '' : 'none';
     $('no-target').style.display = hasTarget ? 'none' : '';
     $('loading').style.display = loading ? '' : 'none';
     $('search-error').style.display = payload.searchError ? '' : 'none';
