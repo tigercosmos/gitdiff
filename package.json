@@ -222,12 +222,12 @@
     "@types/mocha": "^10.0.6",
     "@types/node": "^20.11.0",
     "@types/vscode": "^1.85.0",
-    "@vscode/test-electron": "^2.3.9",
+    "@vscode/test-electron": "^3.1.0",
     "@vscode/vsce": "^2.24.0",
     "esbuild": "^0.28.1",
+    "minimatch": "^3.1.5",
     "mocha": "^10.3.0",
     "ts-node": "^10.9.2",
-    "typescript": "^5.4.0",
-    "minimatch": "^3.1.5"
+    "typescript": "^5.4.0"
   }
 }
