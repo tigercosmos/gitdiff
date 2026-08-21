@@ -3,5 +3,6 @@
   "extensions": ["ts"],
   "spec": ["test/unit/**/*.test.ts"],
   "timeout": 20000,
-  "ui": "bdd"
+  "ui": "bdd",
+  "node-option": ["no-experimental-strip-types"]
 }
