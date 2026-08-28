@@ -103,3 +103,66 @@ describe('ChangedFilesProvider target messages', () => {
     provider.dispose();
   });
 });
+
+describe('ChangedFilesProvider view mode', () => {
+  function setupWith(seed: Record<string, unknown>): { provider: any; posted: Msg[]; store: Map<string, unknown> } {
+    const posted: Msg[] = [];
+    const store = new Map<string, unknown>(Object.entries(seed));
+    const memento = {
+      get: (key: string) => store.get(key),
+      update: async (key: string, value: unknown) => {
+        store.set(key, value);
+      },
+    };
+    const provider = new ChangedFilesProvider(fakeGit, memento, stub.Uri.file('/ext'));
+    provider.resolveWebviewView({
+      webview: {
+        options: {},
+        html: '',
+        cspSource: 'vscode-webview://test',
+        onDidReceiveMessage: () => ({ dispose() {} }),
+        postMessage: (m: Msg) => {
+          posted.push(m);
+          return Promise.resolve(true);
+        },
+      },
+      visible: true,
+      onDidDispose: () => ({ dispose() {} }),
+      onDidChangeVisibility: () => ({ dispose() {} }),
+    });
+    return { provider, posted, store };
+  }
+
+  it('defaults to the tree layout', () => {
+    const { provider } = setupWith({});
+    assert.strictEqual(provider.getViewMode(), 'tree');
+    provider.dispose();
+  });
+
+  it('restores a persisted layout and ignores garbage in workspaceState', () => {
+    const list = setupWith({ 'gitdiff.changedFiles.viewMode': 'list' });
+    assert.strictEqual(list.provider.getViewMode(), 'list');
+    list.provider.dispose();
+    const junk = setupWith({ 'gitdiff.changedFiles.viewMode': { nope: 1 } });
+    assert.strictEqual(junk.provider.getViewMode(), 'tree');
+    junk.provider.dispose();
+  });
+
+  it('persists a toggle, tells the webview, and fires the change event', async () => {
+    const { provider, posted, store } = setupWith({});
+    const fired: string[] = [];
+    provider.onDidChangeViewMode((m: string) => fired.push(m));
+    await provider.setViewMode('list');
+    assert.strictEqual(provider.getViewMode(), 'list');
+    assert.strictEqual(store.get('gitdiff.changedFiles.viewMode'), 'list');
+    assert.deepStrictEqual(fired, ['list']);
+    assert.deepStrictEqual(posted.filter((m) => m.type === 'viewMode'), [
+      { type: 'viewMode', viewMode: 'list' },
+    ]);
+    // Setting the same mode again is a no-op: no message, no event.
+    await provider.setViewMode('list');
+    assert.deepStrictEqual(fired, ['list']);
+    assert.strictEqual(posted.filter((m) => m.type === 'viewMode').length, 1);
+    provider.dispose();
+  });
+});

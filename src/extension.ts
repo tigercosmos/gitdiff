@@ -42,9 +42,22 @@ export function activate(context: vscode.ExtensionContext): GitDiffExports {
     );
   };
   syncHasTargetContext();
+  // Drives which of the two view-mode buttons the view's title bar shows —
+  // "View as List" while in tree mode and vice versa, like the SCM view.
+  const syncViewModeContext = (): void => {
+    void vscode.commands.executeCommand('setContext', 'gitdiff.viewMode', changedFiles.getViewMode());
+  };
+  syncViewModeContext();
   context.subscriptions.push(
     changedFiles,
     changedFiles.onDidChangeTarget(syncHasTargetContext),
+    changedFiles.onDidChangeViewMode(syncViewModeContext),
+    vscode.commands.registerCommand('gitdiff.changedFiles.viewAsTree', () =>
+      changedFiles.setViewMode('tree'),
+    ),
+    vscode.commands.registerCommand('gitdiff.changedFiles.viewAsList', () =>
+      changedFiles.setViewMode('list'),
+    ),
     // Commit/checkout detected by the sidebar's repo watcher: blame results
     // for unchanged buffers may now differ — drop the blame caches.
     changedFiles.onDidChangeGitState(() => {

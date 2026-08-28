@@ -56,9 +56,22 @@ export class FakeElement {
   };
 
   appendChild<T extends FakeElement>(child: T): T {
+    // Like the real DOM, appending a fragment moves its children in rather
+    // than the fragment itself — the script walks `list.children` and
+    // `previousElementSibling` expecting the rows to be direct children.
+    if (child.tagName === '#fragment') {
+      for (const c of child.children) {
+        c.parent = this;
+        this.children.push(c);
+      }
+      child.children.length = 0;
+      return child;
+    }
+    child.parent = this;
     this.children.push(child);
     return child;
   }
+  parent: FakeElement | null = null;
   setAttribute(name: string, value: string): void {
     this.attrs.set(name, String(value));
   }
@@ -76,11 +89,16 @@ export class FakeElement {
   closest(): FakeElement | null {
     return null;
   }
-  get nextElementSibling(): null {
-    return null;
+  get nextElementSibling(): FakeElement | null {
+    return this.sibling(1);
   }
-  get previousElementSibling(): null {
-    return null;
+  get previousElementSibling(): FakeElement | null {
+    return this.sibling(-1);
+  }
+  private sibling(offset: number): FakeElement | null {
+    if (!this.parent) return null;
+    const i = this.parent.children.indexOf(this);
+    return i === -1 ? null : (this.parent.children[i + offset] ?? null);
   }
 
   /** Depth-first search by CSS class, e.g. '.target-repo'. Tests only. */
@@ -105,12 +123,16 @@ export interface FakeDom {
   /** Messages the script posted back to the extension host. */
   posted: unknown[];
   vscodeApi: unknown;
+  /** What the script last passed to `vscode.setState` (undefined before any call). */
+  readonly state: unknown;
 }
 
-export function createFakeDom(): FakeDom {
+/** `initialState` is what `vscode.getState()` returns when the script loads. */
+export function createFakeDom(initialState?: unknown): FakeDom {
   const byId = new Map<string, FakeElement>();
   const listeners: Array<(event: { data: unknown }) => void> = [];
   const posted: unknown[] = [];
+  let state: unknown = initialState;
 
   const document = {
     getElementById(id: string): FakeElement {
@@ -131,6 +153,9 @@ export function createFakeDom(): FakeDom {
     byId,
     document,
     posted,
+    get state() {
+      return state;
+    },
     window: {
       addEventListener(type: string, cb: (event: { data: unknown }) => void) {
         if (type === 'message') listeners.push(cb);
@@ -141,8 +166,10 @@ export function createFakeDom(): FakeDom {
     },
     vscodeApi: {
       postMessage: (m: unknown) => posted.push(m),
-      setState: () => {},
-      getState: () => undefined,
+      setState: (s: unknown) => {
+        state = s;
+      },
+      getState: () => state,
     },
   };
 }
@@ -155,8 +182,8 @@ export function extractScript(html: string): string {
 }
 
 /** Execute the webview script against a fresh fake DOM and return it. */
-export function runWebviewScript(html: string): FakeDom {
-  const dom = createFakeDom();
+export function runWebviewScript(html: string, initialState?: unknown): FakeDom {
+  const dom = createFakeDom(initialState);
   const fn = new Function('document', 'window', 'acquireVsCodeApi', extractScript(html));
   fn(dom.document, dom.window, () => dom.vscodeApi);
   return dom;

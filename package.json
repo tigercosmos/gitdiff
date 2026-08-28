@@ -16,7 +16,7 @@
     "changed files",
     "merge"
   ],
-  "version": "0.9.1",
+  "version": "0.10.0",
   "publisher": "tigercosmos",
   "icon": "icons/activity.png",
   "engines": {
@@ -83,6 +83,16 @@
         "command": "gitdiff.changedFiles.clearTarget",
         "title": "GitDiff: Clear Comparison Target",
         "icon": "$(clear-all)"
+      },
+      {
+        "command": "gitdiff.changedFiles.viewAsTree",
+        "title": "GitDiff: View Changed Files as Tree",
+        "icon": "$(list-tree)"
+      },
+      {
+        "command": "gitdiff.changedFiles.viewAsList",
+        "title": "GitDiff: View Changed Files as List",
+        "icon": "$(list-flat)"
       }
     ],
     "viewsContainers": {
@@ -164,6 +174,16 @@
         }
       ],
       "view/title": [
+        {
+          "command": "gitdiff.changedFiles.viewAsList",
+          "when": "view == gitdiff.changedFiles && gitdiff.viewMode == tree",
+          "group": "navigation@0"
+        },
+        {
+          "command": "gitdiff.changedFiles.viewAsTree",
+          "when": "view == gitdiff.changedFiles && gitdiff.viewMode == list",
+          "group": "navigation@0"
+        },
         {
           "command": "gitdiff.changedFiles.setTarget",
           "when": "view == gitdiff.changedFiles",
