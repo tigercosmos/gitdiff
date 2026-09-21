@@ -14,6 +14,12 @@ export interface GitdiffParts {
    * Absent for diffs opened against a specific commit (those stay pinned).
    */
   branch?: string;
+  /**
+   * URI path to show instead of `relPath`. The multi-file diff editor marks an
+   * entry as renamed when its two sides' paths differ, so that view sets this
+   * to the working-tree file's path.
+   */
+  displayPath?: string;
 }
 
 /**
@@ -23,10 +29,12 @@ export interface GitdiffParts {
  * `?`, `#`, `&`, `%`, spaces, or non-ASCII characters.
  */
 export function partsToPathAndQuery(parts: GitdiffParts): { path: string; query: string } {
-  const path = parts.relPath.startsWith('/') ? parts.relPath : `/${parts.relPath}`;
+  const shown = parts.displayPath ?? parts.relPath;
+  const path = shown.startsWith('/') ? shown : `/${shown}`;
   const params = new URLSearchParams();
   params.set('ref', parts.ref);
   params.set('repo', parts.repoRoot);
+  if (parts.displayPath !== undefined) params.set('rel', parts.relPath);
   if (parts.branch) params.set('branch', parts.branch);
   return { path, query: params.toString() };
 }
@@ -39,11 +47,13 @@ export function pathAndQueryToParts(path: string, query: string): GitdiffParts {
     throw new Error('Missing ref or repo in gitdiff URI query');
   }
   const branch = params.get('branch') ?? undefined;
+  const rel = params.get('rel');
   return {
     ref,
     repoRoot,
-    relPath: path.startsWith('/') ? path.slice(1) : path,
+    relPath: rel ?? (path.startsWith('/') ? path.slice(1) : path),
     ...(branch ? { branch } : {}),
+    ...(rel !== null ? { displayPath: path } : {}),
   };
 }
 

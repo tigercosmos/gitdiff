@@ -35,6 +35,34 @@ describe('changedFiles provider (e2e)', function () {
     assert.strictEqual(typeof api.changedFiles.getAllFiles, 'function');
   });
 
+  it('opens every listed file in one multi-file diff tab', async () => {
+    const api = await getApi();
+    const root = makeRepo();
+    fs.writeFileSync(path.join(root, 'a.ts'), 'export const a = 1;\n');
+    fs.writeFileSync(path.join(root, 'gone.ts'), 'export const g = 1;\n');
+    commit(root, 'baseline');
+    fs.writeFileSync(path.join(root, 'a.ts'), 'export const a = 99;\n');
+    fs.unlinkSync(path.join(root, 'gone.ts'));
+    fs.writeFileSync(path.join(root, 'new.md'), 'untracked doc\n');
+    const headFull = git(root, ['rev-parse', 'HEAD']).trim();
+
+    await api.changedFiles.setTarget(
+      { ref: headFull, display: headFull.slice(0, 8) },
+      fs.realpathSync.native(root),
+    );
+    await settle(50);
+    assert.strictEqual(api.changedFiles.getVisibleFiles().length, 3);
+
+    await vscode.commands.executeCommand('gitdiff.changedFiles.openAll');
+    await settle(200);
+
+    const label = `All changes (vs ${headFull.slice(0, 8)})`;
+    const tabs = vscode.window.tabGroups.all.flatMap((g) => g.tabs);
+    const tab = tabs.find((t) => t.label.startsWith(label));
+    assert.ok(tab, `expected a multi-file diff tab, got: ${tabs.map((t) => t.label).join(' | ')}`);
+    await vscode.window.tabGroups.close(tab!);
+  });
+
   it('lists working-tree changes against a target after setTarget', async () => {
     const api = await getApi();
     const root = makeRepo();

@@ -15,6 +15,12 @@ describe('gitdiff URI codec', () => {
     { ref: 'main', repoRoot: '/Users/me/with space/proj', relPath: 'a.ts' },
     { ref: 'main', repoRoot: '/Users/me/proj', relPath: 'src/file with space.ts' },
     { ref: '日本語', repoRoot: '/Users/me/proj', relPath: 'src/файл.ts' },
+    {
+      ref: 'main',
+      repoRoot: '/Users/me/proj',
+      relPath: 'src/x.ts',
+      displayPath: '/Users/me/proj/src/x.ts',
+    },
   ];
 
   for (const c of cases) {

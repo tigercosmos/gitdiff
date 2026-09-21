@@ -1,8 +1,10 @@
+import * as path from 'path';
 import * as vscode from 'vscode';
 import { GitService } from './gitService';
 import { GitShowProvider, GITDIFF_SCHEME } from './gitShowProvider';
 import { ActiveDiffTracker } from './activeDiffTracker';
 import { DiffOpener } from './diffOpener';
+import { planAllChanges } from './allChanges';
 import { RefPicker } from './refPicker';
 import { decodeGitdiffUri, encodeGitdiffUri } from './util/uri';
 import { ChangedFilesProvider, ChangedFile, VIEW_ID } from './changedFilesProvider';
@@ -168,6 +170,37 @@ export function activate(context: vscode.ExtensionContext): GitDiffExports {
         await opener.open(vscode.Uri.file(file.absPath), target);
       },
     ),
+    vscode.commands.registerCommand('gitdiff.changedFiles.openAll', async () => {
+      const target = changedFiles.getCurrentTarget();
+      const repoRoot = changedFiles.getCurrentRepoRoot();
+      if (!target || !repoRoot) {
+        void vscode.window.showInformationMessage('GitDiff: set a comparison target first.');
+        return;
+      }
+      const files = changedFiles.getVisibleFiles();
+      if (files.length === 0) {
+        void vscode.window.showInformationMessage('GitDiff: no changed files to show.');
+        return;
+      }
+      const resources = planAllChanges(files, target, repoRoot).map((entry) => {
+        const right = vscode.Uri.file(entry.absPath);
+        return [
+          right,
+          entry.left
+            ? encodeGitdiffUri({
+                ...entry.left,
+                displayPath: vscode.Uri.file(path.join(repoRoot, entry.left.relPath)).path,
+              })
+            : undefined,
+          entry.hasRight ? right : undefined,
+        ];
+      });
+      await vscode.commands.executeCommand(
+        'vscode.changes',
+        `All changes (vs ${target.display})`,
+        resources,
+      );
+    }),
     vscode.commands.registerCommand(
       'gitdiff.changedFiles.revertFile',
       async (file?: ChangedFile) => {

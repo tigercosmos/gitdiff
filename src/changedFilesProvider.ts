@@ -128,6 +128,8 @@ export class ChangedFilesProvider implements vscode.WebviewViewProvider, vscode.
   private viewMode: ViewMode;
   private view: vscode.WebviewView | undefined;
   private files: ChangedFile[] = [];
+  /** `files` after the filter pipeline — what the view currently lists. */
+  private visibleFiles: ChangedFile[] = [];
   /**
    * Two sequence counters, each guarding a different invariant:
    *  - `listSeq` bumps when the underlying file list is invalidated
@@ -301,6 +303,10 @@ export class ChangedFilesProvider implements vscode.WebviewViewProvider, vscode.
     return this.files;
   }
 
+  getVisibleFiles(): readonly ChangedFile[] {
+    return this.visibleFiles;
+  }
+
   getFilter(): FilterState {
     return { ...this.filter };
   }
@@ -352,6 +358,7 @@ export class ChangedFilesProvider implements vscode.WebviewViewProvider, vscode.
   async setTarget(picked: PickedRef, repoRoot: string): Promise<void> {
     this.invalidate();
     this.files = [];
+    this.visibleFiles = [];
     this.target = {
       ref: picked.ref,
       display: picked.display,
@@ -371,6 +378,7 @@ export class ChangedFilesProvider implements vscode.WebviewViewProvider, vscode.
     this._onDidChangeTarget.fire();
     void this.installGitWatcher();
     this.files = [];
+    this.visibleFiles = [];
     this.post({
       type: 'files',
       files: [],
@@ -383,6 +391,7 @@ export class ChangedFilesProvider implements vscode.WebviewViewProvider, vscode.
     const token = this.invalidate();
     if (!this.target) {
       this.files = [];
+      this.visibleFiles = [];
       this.post({ type: 'files', files: [], hasTarget: false, targetLabel: '' });
       return;
     }
@@ -441,6 +450,7 @@ export class ChangedFilesProvider implements vscode.WebviewViewProvider, vscode.
         `GitDiff: failed to list changes: ${err instanceof Error ? err.message : String(err)}`,
       );
       this.files = [];
+      this.visibleFiles = [];
       this.post({
         type: 'files',
         files: [],
@@ -512,6 +522,7 @@ export class ChangedFilesProvider implements vscode.WebviewViewProvider, vscode.
       isCancelled: () => token !== this.filterSeq,
     });
     if (token !== this.filterSeq) return;
+    this.visibleFiles = result.files;
     this.post({
       type: 'files',
       files: result.files.map((f) => ({ relPath: f.relPath, status: f.status })),

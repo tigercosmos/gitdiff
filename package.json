@@ -16,11 +16,11 @@
     "changed files",
     "merge"
   ],
-  "version": "0.10.0",
+  "version": "0.11.0",
   "publisher": "tigercosmos",
   "icon": "icons/activity.png",
   "engines": {
-    "vscode": "^1.85.0"
+    "vscode": "^1.87.0"
   },
   "categories": [
     "SCM Providers",
@@ -74,6 +74,11 @@
       {
         "command": "gitdiff.changedFiles.openFile",
         "title": "GitDiff: Open Diff for File"
+      },
+      {
+        "command": "gitdiff.changedFiles.openAll",
+        "title": "GitDiff: Open All Changes",
+        "icon": "$(diff-multiple)"
       },
       {
         "command": "gitdiff.changedFiles.revertFile",
@@ -133,6 +138,10 @@
           "when": "gitdiff.activeDiff"
         },
         {
+          "command": "gitdiff.changedFiles.openAll",
+          "when": "gitdiff.hasTarget"
+        },
+        {
           "command": "gitdiff.changedFiles.revertFile",
           "when": "false"
         }
@@ -182,6 +191,11 @@
         {
           "command": "gitdiff.changedFiles.viewAsTree",
           "when": "view == gitdiff.changedFiles && gitdiff.viewMode == list",
+          "group": "navigation@0"
+        },
+        {
+          "command": "gitdiff.changedFiles.openAll",
+          "when": "view == gitdiff.changedFiles && gitdiff.hasTarget",
           "group": "navigation@0"
         },
         {
