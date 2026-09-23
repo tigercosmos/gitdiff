@@ -16,7 +16,7 @@
     "changed files",
     "merge"
   ],
-  "version": "0.10.0",
+  "version": "0.11.0",
   "publisher": "tigercosmos",
   "icon": "icons/activity.png",
   "engines": {
@@ -76,6 +76,11 @@
         "title": "GitDiff: Open Diff for File"
       },
       {
+        "command": "gitdiff.changedFiles.openAll",
+        "title": "GitDiff: Open All Changes",
+        "icon": "$(diff-multiple)"
+      },
+      {
         "command": "gitdiff.changedFiles.revertFile",
         "title": "GitDiff: Revert File to Comparison Target"
       },
@@ -133,6 +138,10 @@
           "when": "gitdiff.activeDiff"
         },
         {
+          "command": "gitdiff.changedFiles.openAll",
+          "when": "gitdiff.hasTarget && config.gitdiff.openAllChanges.enabled"
+        },
+        {
           "command": "gitdiff.changedFiles.revertFile",
           "when": "false"
         }
@@ -185,6 +194,11 @@
           "group": "navigation@0"
         },
         {
+          "command": "gitdiff.changedFiles.openAll",
+          "when": "view == gitdiff.changedFiles && gitdiff.hasTarget && config.gitdiff.openAllChanges.enabled",
+          "group": "navigation@0"
+        },
+        {
           "command": "gitdiff.changedFiles.setTarget",
           "when": "view == gitdiff.changedFiles",
           "group": "navigation@1"
@@ -216,6 +230,11 @@
           "default": "",
           "scope": "machine",
           "description": "Absolute path to the git executable. Leave empty to resolve from PATH. Machine-scoped: workspace settings cannot override it (a workspace-controlled binary path would be a privilege-escalation vector)."
+        },
+        "gitdiff.openAllChanges.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show an \"Open All Changes\" button in the Changed Files view that opens every listed file against the comparison target in one multi-file diff tab (VS Code 1.87+; older versions open one diff tab per file)."
         },
         "gitdiff.lineBlame.enabled": {
           "type": "boolean",

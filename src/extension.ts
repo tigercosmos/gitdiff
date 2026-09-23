@@ -1,11 +1,13 @@
+import * as path from 'path';
 import * as vscode from 'vscode';
 import { GitService } from './gitService';
 import { GitShowProvider, GITDIFF_SCHEME } from './gitShowProvider';
 import { ActiveDiffTracker } from './activeDiffTracker';
 import { DiffOpener } from './diffOpener';
+import { multiDiffAvailable, planAllChanges, ChangeEntry } from './allChanges';
 import { RefPicker } from './refPicker';
 import { decodeGitdiffUri, encodeGitdiffUri } from './util/uri';
-import { ChangedFilesProvider, ChangedFile, VIEW_ID } from './changedFilesProvider';
+import { ChangedFilesProvider, ChangedFile, VIEW_ID, filterFiles } from './changedFilesProvider';
 import { BlameHoverProvider } from './blameHoverProvider';
 import { CurrentLineBlameController } from './currentLineBlame';
 import { OPEN_COMMIT_DIFF_COMMAND } from './blameFormat';
@@ -168,6 +170,66 @@ export function activate(context: vscode.ExtensionContext): GitDiffExports {
         await opener.open(vscode.Uri.file(file.absPath), target);
       },
     ),
+    // Opt-in via `gitdiff.openAllChanges.enabled`; the `when` clauses in
+    // package.json read that setting directly, so no context key is needed.
+    vscode.commands.registerCommand('gitdiff.changedFiles.openAll', async () => {
+      const target = changedFiles.getCurrentTarget();
+      const repoRoot = changedFiles.getCurrentRepoRoot();
+      if (!target || !repoRoot) {
+        void vscode.window.showInformationMessage('GitDiff: set a comparison target first.');
+        return;
+      }
+      // Same filter pipeline the sidebar uses, so "all" means "all you can see".
+      const { files } = await filterFiles(changedFiles.getAllFiles(), changedFiles.getFilter());
+      if (files.length === 0) {
+        void vscode.window.showInformationMessage('GitDiff: no changed files to show.');
+        return;
+      }
+      const entries = planAllChanges(files, target, repoRoot);
+      const multiDiff = multiDiffAvailable(
+        vscode.version,
+        vscode.workspace.getConfiguration('multiDiffEditor').get<boolean>('experimental.enabled'),
+      );
+      if (!multiDiff) {
+        // VS Code < 1.87 without the experimental multi-file diff editor:
+        // fall back to one ordinary diff tab per file via the single-file
+        // opener — the same path a sidebar click takes, including for deleted
+        // files (absent right side), so the tabs are tracked like any other.
+        for (const entry of entries) {
+          await opener.open(vscode.Uri.file(entry.absPath), target, entry.left?.relPath);
+        }
+        return;
+      }
+      // Same guard as the single-file opener: binary / non-UTF-8 blobs at the
+      // target get a placeholder from the content provider, which would make
+      // for a misleading diff, so leave them out and say so.
+      const supported = await dropUnsupportedAtTarget(git, entries);
+      const skipped = entries.length - supported.length;
+      if (skipped > 0) {
+        void vscode.window.showWarningMessage(
+          `GitDiff: skipped ${skipped} binary or non-UTF-8 file${skipped === 1 ? '' : 's'} at ${target.display}.`,
+        );
+      }
+      if (supported.length === 0) return;
+      const resources = supported.map((entry) => {
+        const right = vscode.Uri.file(entry.absPath);
+        return [
+          right,
+          entry.left
+            ? encodeGitdiffUri({
+                ...entry.left,
+                displayPath: vscode.Uri.file(path.join(repoRoot, entry.left.relPath)).path,
+              })
+            : undefined,
+          entry.hasRight ? right : undefined,
+        ];
+      });
+      await vscode.commands.executeCommand(
+        'vscode.changes',
+        `${ALL_CHANGES_TITLE_PREFIX}${target.display})`,
+        resources,
+      );
+    }),
     vscode.commands.registerCommand(
       'gitdiff.changedFiles.revertFile',
       async (file?: ChangedFile) => {
@@ -218,6 +280,7 @@ export function activate(context: vscode.ExtensionContext): GitDiffExports {
     vscode.commands.registerCommand('gitdiff.changedFiles.clearTarget', async () => {
       const tabs: vscode.Tab[] = [];
       for (const { tab } of openGitdiffTabs()) tabs.push(tab);
+      tabs.push(...openGitdiffMultiDiffTabs());
       await changedFiles.clearTarget();
       if (tabs.length > 0) {
         await vscode.window.tabGroups.close(tabs);
@@ -241,6 +304,7 @@ export function activate(context: vscode.ExtensionContext): GitDiffExports {
 export async function deactivate(): Promise<void> {
   const toClose: vscode.Tab[] = [];
   for (const { tab } of openGitdiffTabs()) toClose.push(tab);
+  toClose.push(...openGitdiffMultiDiffTabs());
   if (toClose.length > 0) {
     await vscode.window.tabGroups.close(toClose);
   }
@@ -330,6 +394,59 @@ function* openGitdiffTabs(): Generator<{ uri: vscode.Uri; tab: vscode.Tab }> {
       }
     }
   }
+}
+
+/** Title prefix of the multi-file "All changes" tab; also used to recognise it. */
+const ALL_CHANGES_TITLE_PREFIX = 'All changes (vs ';
+
+/**
+ * "All changes" tabs opened via `vscode.changes`. Their input is a
+ * `TabInputTextMultiDiff`, which the 1.85 typings don't declare yet, so
+ * detect it structurally. `textDiffs` lists only two-sided entries, so a tab
+ * holding nothing but additions/deletions is recognised by our title instead.
+ * Kept separate from `openGitdiffTabs()` because the per-URI refresh /
+ * re-open logic there assumes a single-file diff tab.
+ */
+function openGitdiffMultiDiffTabs(): vscode.Tab[] {
+  const tabs: vscode.Tab[] = [];
+  for (const group of vscode.window.tabGroups.all) {
+    for (const tab of group.tabs) {
+      const textDiffs = (tab.input as { textDiffs?: unknown } | undefined)?.textDiffs;
+      if (!Array.isArray(textDiffs)) continue;
+      const isOurs =
+        tab.label.startsWith(ALL_CHANGES_TITLE_PREFIX) ||
+        textDiffs.some((d: { original?: vscode.Uri }) => d?.original?.scheme === GITDIFF_SCHEME);
+      if (isOurs) tabs.push(tab);
+    }
+  }
+  return tabs;
+}
+
+/** Max parallel `git show` probes when preflighting the multi-file diff. */
+const PREFLIGHT_CONCURRENCY = 8;
+
+/** Drop entries whose target-side blob is binary or not UTF-8 (order kept). */
+async function dropUnsupportedAtTarget(
+  git: GitService,
+  entries: readonly ChangeEntry[],
+): Promise<ChangeEntry[]> {
+  const keep: boolean[] = entries.map(() => true);
+  let next = 0;
+  async function worker(): Promise<void> {
+    while (next < entries.length) {
+      const i = next++;
+      const left = entries[i].left;
+      if (!left) continue;
+      try {
+        const show = await git.showFileAtSha(left.repoRoot, left.ref, left.relPath);
+        if (show.exists && show.kind !== 'text') keep[i] = false;
+      } catch {
+        // Let the content provider surface the error in the diff itself.
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: PREFLIGHT_CONCURRENCY }, worker));
+  return entries.filter((_, i) => keep[i]);
 }
 
 function findTabForLeft(left: vscode.Uri): vscode.Tab | undefined {
