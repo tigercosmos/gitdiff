@@ -16,8 +16,16 @@ export class DiffOpener {
    * Returns the resolved `repoRoot` on success so the caller can wire other
    * UI (e.g. the changed-files sidebar) to the same repo + target. Returns
    * `undefined` if the diff was not opened (not-a-repo, binary, non-UTF-8).
+   *
+   * `relPathAtTarget` overrides the path read at the target — for a renamed
+   * file, the pre-rename path — so the diff compares old content with the
+   * renamed working-tree file rather than showing it as an addition.
    */
-  async open(fileUri: vscode.Uri, picked: PickedRef): Promise<string | undefined> {
+  async open(
+    fileUri: vscode.Uri,
+    picked: PickedRef,
+    relPathAtTarget?: string,
+  ): Promise<string | undefined> {
     let repoRoot: string;
     try {
       repoRoot = await this.git.repoRoot(fileUri.fsPath);
@@ -25,7 +33,7 @@ export class DiffOpener {
       void vscode.window.showErrorMessage('GitDiff: Not a git repository.');
       return undefined;
     }
-    const relPath = this.git.relPath(repoRoot, fileUri.fsPath);
+    const relPath = relPathAtTarget ?? this.git.relPath(repoRoot, fileUri.fsPath);
     const sha = picked.ref;
 
     const show = await this.git.showFileAtSha(repoRoot, sha, relPath);

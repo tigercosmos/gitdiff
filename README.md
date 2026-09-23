@@ -12,7 +12,7 @@
 
 <p align="center">
   <a href="https://marketplace.visualstudio.com/items?itemName=tigercosmos.gitdiff"><img alt="VS Code Marketplace" src="https://img.shields.io/badge/VS%20Code-Marketplace-007ACC?logo=visualstudiocode&logoColor=white"></a>
-  <img alt="VS Code engine" src="https://img.shields.io/badge/VS%20Code-%5E1.87-1f6feb">
+  <img alt="VS Code engine" src="https://img.shields.io/badge/VS%20Code-%5E1.85-1f6feb">
   <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-5.4-3178c6?logo=typescript&logoColor=white">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-green">
 </p>
@@ -42,7 +42,7 @@ GitDiff does exactly that — and unlike a read-only `git diff`, **the working-t
 - **Current-line blame** — the line your cursor is on shows a dim end-of-line annotation (author, date, commit subject) in any file in a git repo and in GitDiff's diff panes. Toggle with `gitdiff.lineBlame.enabled`.
 - **Blame on hover** — hover a line to see the last commit that touched it (author, date, commit subject, short SHA), plus a link to **open that commit's diff for the file** in the editor and, when a remote is configured, links to **view the commit on the web** and its **pull/merge request** (resolved from the commit subject — no token or API call). The working-tree side blames your live contents, so it stays accurate as you edit; uncommitted lines show a clean "Not committed yet".
 - **Changed-Files sidebar** — pick a target once, see every file in your tree that differs from it, click to open the diff. The list refreshes itself when you save a file or when the repo changes underneath you (commit, checkout, staging — from any terminal or the built-in SCM view).
-- **All changes in one scroll** — click **Open All Changes** in the view's title to open every listed file in a single multi-file diff tab and review top to bottom, like a pull request page. It follows the sidebar's search and path filters, and the working-tree side stays editable.
+- **All changes in one scroll** (opt-in) — enable `gitdiff.openAllChanges.enabled` and click **Open All Changes** in the view's title to open every listed file in a single multi-file diff tab and review top to bottom, like a pull request page. It follows the sidebar's search and path filters, and the working-tree side stays editable. Needs the VS Code multi-file diff editor (on by default since 1.87); older versions open one diff tab per file instead.
 - **Tree or list layout** — by default the sidebar nests changed files under their folders the way the Explorer does (folders first, single-child folder chains compacted into one `a/b/c` row, click or ←/→ to collapse/expand), so you can see at a glance which parts of the codebase a change touches. Switch to a flat list and back with the **View as List** / **View as Tree** button in the view's title; the choice is remembered per workspace.
 - **Active-file highlight** — the file shown in the focused diff is highlighted in the sidebar list (and scrolled into view), so you always know where you are while clicking through changes.
 - **Revert a file to the target** — hover a row in the sidebar and click the **↺** button (aligned right) to discard that file's working-tree changes and restore it to its state at the comparison branch/commit. Working-tree additions are removed; files deleted from your tree are recreated. A confirmation prompt guards the discard.
@@ -120,11 +120,12 @@ When a GitDiff diff is the active editor:
 | Setting | Type | Default | Description |
 |---|---|---|---|
 | `gitdiff.commitPickerLimit` | number | `100` | Maximum number of recent commits shown in the commit picker (1–5000). |
+| `gitdiff.openAllChanges.enabled` | boolean | `false` | Show the **Open All Changes** button in the Changed Files view (one multi-file diff tab for every listed file; per-file tabs on VS Code < 1.87). |
 | `gitdiff.gitPath` | string | `""` | Absolute path to the `git` executable. Empty resolves from `PATH`. **Machine-scoped** — workspace settings cannot override it. |
 
 ## Requirements
 
-- VS Code **1.87** or newer.
+- VS Code **1.85** or newer. The optional multi-file **Open All Changes** view uses the multi-file diff editor, which VS Code turns on by default from **1.87**; on 1.85–1.86 it opens one diff tab per file instead unless `multiDiffEditor.experimental.enabled` is set.
 - A local `git` binary on `PATH` (or set `gitdiff.gitPath`).
 - A real `file:` workspace. Virtual workspaces (`vscode.dev`, browser-based Codespaces, Remote – Repositories) are not supported.
 

@@ -35,15 +35,19 @@ describe('changedFiles provider (e2e)', function () {
     assert.strictEqual(typeof api.changedFiles.getAllFiles, 'function');
   });
 
-  it('opens every listed file in one multi-file diff tab', async () => {
+  it('opens every listed file in one multi-file diff tab when opted in', async function () {
     const api = await getApi();
+    const config = vscode.workspace.getConfiguration('gitdiff');
+    await config.update('openAllChanges.enabled', true, vscode.ConfigurationTarget.Global);
     const root = makeRepo();
     fs.writeFileSync(path.join(root, 'a.ts'), 'export const a = 1;\n');
     fs.writeFileSync(path.join(root, 'gone.ts'), 'export const g = 1;\n');
+    fs.writeFileSync(path.join(root, 'blob.bin'), Buffer.from([0, 1, 2, 255, 0, 7]));
     commit(root, 'baseline');
     fs.writeFileSync(path.join(root, 'a.ts'), 'export const a = 99;\n');
     fs.unlinkSync(path.join(root, 'gone.ts'));
     fs.writeFileSync(path.join(root, 'new.md'), 'untracked doc\n');
+    fs.writeFileSync(path.join(root, 'blob.bin'), Buffer.from([0, 9, 9, 255]));
     const headFull = git(root, ['rev-parse', 'HEAD']).trim();
 
     await api.changedFiles.setTarget(
@@ -51,7 +55,7 @@ describe('changedFiles provider (e2e)', function () {
       fs.realpathSync.native(root),
     );
     await settle(50);
-    assert.strictEqual(api.changedFiles.getVisibleFiles().length, 3);
+    assert.strictEqual(api.changedFiles.getAllFiles().length, 4);
 
     await vscode.commands.executeCommand('gitdiff.changedFiles.openAll');
     await settle(200);
@@ -59,8 +63,57 @@ describe('changedFiles provider (e2e)', function () {
     const label = `All changes (vs ${headFull.slice(0, 8)})`;
     const tabs = vscode.window.tabGroups.all.flatMap((g) => g.tabs);
     const tab = tabs.find((t) => t.label.startsWith(label));
-    assert.ok(tab, `expected a multi-file diff tab, got: ${tabs.map((t) => t.label).join(' | ')}`);
-    await vscode.window.tabGroups.close(tab!);
+    try {
+      assert.ok(tab, `expected a multi-file diff tab, got: ${tabs.map((t) => t.label).join(' | ')}`);
+      const textDiffs = (tab!.input as { textDiffs?: { original?: vscode.Uri }[] }).textDiffs;
+      assert.ok(Array.isArray(textDiffs), 'tab input should be a multi-diff');
+      // The tab reports only two-sided entries as text diffs: a.ts (modified).
+      // gone.ts / new.md are one-sided, and blob.bin — two-sided — must have
+      // been skipped as binary, or it would be listed here too.
+      assert.deepStrictEqual(
+        textDiffs!.map((d) => d.original?.query && new URLSearchParams(d.original.query).get('rel')),
+        ['a.ts'],
+      );
+
+      // Clear Comparison Target closes it like any other GitDiff tab.
+      await vscode.commands.executeCommand('gitdiff.changedFiles.clearTarget');
+      await settle(200);
+      const after = vscode.window.tabGroups.all.flatMap((g) => g.tabs);
+      assert.ok(!after.some((t) => t.label.startsWith(label)), 'multi-diff tab should be closed');
+    } finally {
+      await config.update('openAllChanges.enabled', undefined, vscode.ConfigurationTarget.Global);
+    }
+  });
+
+  it('clears a multi-file diff tab that holds only one-sided entries', async () => {
+    const api = await getApi();
+    const config = vscode.workspace.getConfiguration('gitdiff');
+    await config.update('openAllChanges.enabled', true, vscode.ConfigurationTarget.Global);
+    try {
+      const root = makeRepo();
+      fs.writeFileSync(path.join(root, 'gone.ts'), 'export const g = 1;\n');
+      commit(root, 'baseline');
+      fs.unlinkSync(path.join(root, 'gone.ts'));
+      fs.writeFileSync(path.join(root, 'new.md'), 'untracked doc\n');
+      const headFull = git(root, ['rev-parse', 'HEAD']).trim();
+      await api.changedFiles.setTarget(
+        { ref: headFull, display: headFull.slice(0, 8) },
+        fs.realpathSync.native(root),
+      );
+      await settle(50);
+
+      await vscode.commands.executeCommand('gitdiff.changedFiles.openAll');
+      await settle(200);
+      const label = `All changes (vs ${headFull.slice(0, 8)})`;
+      const open = () => vscode.window.tabGroups.all.flatMap((g) => g.tabs);
+      assert.ok(open().some((t) => t.label.startsWith(label)), 'multi-diff tab should open');
+
+      await vscode.commands.executeCommand('gitdiff.changedFiles.clearTarget');
+      await settle(200);
+      assert.ok(!open().some((t) => t.label.startsWith(label)), 'multi-diff tab should be closed');
+    } finally {
+      await config.update('openAllChanges.enabled', undefined, vscode.ConfigurationTarget.Global);
+    }
   });
 
   it('lists working-tree changes against a target after setTarget', async () => {
