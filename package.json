@@ -16,7 +16,7 @@
     "changed files",
     "merge"
   ],
-  "version": "0.11.0",
+  "version": "0.11.1",
   "publisher": "tigercosmos",
   "icon": "icons/activity.png",
   "engines": {
@@ -233,7 +233,7 @@
         },
         "gitdiff.openAllChanges.enabled": {
           "type": "boolean",
-          "default": false,
+          "default": true,
           "description": "Show an \"Open All Changes\" button in the Changed Files view that opens every listed file against the comparison target in one multi-file diff tab (VS Code 1.87+; older versions open one diff tab per file)."
         },
         "gitdiff.lineBlame.enabled": {

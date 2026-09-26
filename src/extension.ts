@@ -170,8 +170,9 @@ export function activate(context: vscode.ExtensionContext): GitDiffExports {
         await opener.open(vscode.Uri.file(file.absPath), target);
       },
     ),
-    // Opt-in via `gitdiff.openAllChanges.enabled`; the `when` clauses in
-    // package.json read that setting directly, so no context key is needed.
+    // On by default; `gitdiff.openAllChanges.enabled` can hide it. The `when`
+    // clauses in package.json read that setting directly, so no context key is
+    // needed.
     vscode.commands.registerCommand('gitdiff.changedFiles.openAll', async () => {
       const target = changedFiles.getCurrentTarget();
       const repoRoot = changedFiles.getCurrentRepoRoot();
