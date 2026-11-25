@@ -84,11 +84,11 @@ Hover over any line in the diff to see the last commit that touched it — autho
 ### Browse every changed file
 
 1. Click the **GitDiff** icon in the Activity Bar.
-2. Hit **Set Comparison Target…** in the view's title. The chooser offers **Branch…**, **Commit…**, the **3 newest commits on the current branch** as one-click rows, and free-form typing of any revision.
+2. The view starts out comparing against the remote's default branch, marked **(default)**. That is the branch `origin/HEAD` points at, usually `origin/main` or `origin/master`. Without `origin/HEAD`, it tries `origin/main`, then `origin/master`. To use another branch every time, set `gitdiff.defaultTarget`; the **Open Settings** button (`$(gear)`) in the view's title opens GitDiff's settings. To pick a target for now, hit **Set Comparison Target…** in the view's title. The chooser offers **Branch…**, **Commit…**, the **3 newest commits on the current branch** as one-click rows, and free-form typing of any revision.
 3. Click any file to open its diff against your chosen target. Files are grouped under their folders; click a folder (or press ← / →) to collapse or expand it. Prefer a flat list? Click **View as List** (`$(list-flat)`) in the view's title — **View as Tree** (`$(list-tree)`) brings the folders back.
 4. Narrow the list with the **Search** box (toggle match-case / whole-word / regex on the right) and the **files to include** / **files to exclude** glob inputs — same comma-separated syntax as VS Code's Search panel (`*.ts`, `src/`, `**/*.test.ts`, `*.{ts,tsx}`). Filter state is remembered per workspace.
 5. Hover a row and click the **↺ Revert** button on the right to discard that file's changes and restore it to the target (a confirmation prompt guards the discard).
-6. Use the **Clear Comparison Target** button (`$(clear-all)`) in the view's title to drop the target and close every open GitDiff diff in one click.
+6. Use the **Clear Comparison Target** button (`$(clear-all)`) in the view's title to drop a picked target and close every open GitDiff diff in one click. The view then goes back to the default target.
 
 ### Editor title actions
 
@@ -114,11 +114,13 @@ When a GitDiff diff is the active editor:
 | Clear Comparison Target (sidebar) | `gitdiff.changedFiles.clearTarget` |
 | View Changed Files as Tree (sidebar) | `gitdiff.changedFiles.viewAsTree` |
 | View Changed Files as List (sidebar) | `gitdiff.changedFiles.viewAsList` |
+| Open Settings (sidebar) | `gitdiff.openSettings` |
 
 ## Configuration
 
 | Setting | Type | Default | Description |
 |---|---|---|---|
+| `gitdiff.defaultTarget` | string | `""` | Branch or ref the Changed Files view compares against until you pick a target. Empty uses the branch `origin/HEAD` points at (usually `origin/main` or `origin/master`); without `origin/HEAD`, `origin/main`, then `origin/master`. The view resolves it again on each refresh (the **Refresh** button, a save, or a commit or checkout). A fetch alone does not trigger a refresh. |
 | `gitdiff.commitPickerLimit` | number | `100` | Maximum number of recent commits shown in the commit picker (1–5000). |
 | `gitdiff.openAllChanges.enabled` | boolean | `true` | Show the **Open All Changes** button in the Changed Files view — one multi-file diff tab for every listed file (per-file tabs on VS Code < 1.87). Set to `false` to hide the button. |
 | `gitdiff.gitPath` | string | `""` | Absolute path to the `git` executable. Empty resolves from `PATH`. **Machine-scoped** — workspace settings cannot override it. |

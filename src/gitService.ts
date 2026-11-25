@@ -314,6 +314,23 @@ export class GitService {
     return local.code === 0 || remote.code === 0;
   }
 
+  /**
+   * The branch `refs/remotes/<remote>/HEAD` points at, as a short name such
+   * as `origin/main` — the remote's default branch as recorded by `git clone`
+   * (or `git remote set-head`). Undefined when the symref is missing.
+   */
+  async remoteHead(repoRoot: string, remote = 'origin'): Promise<string | undefined> {
+    const r = await execGit(
+      this.gitPath(),
+      ['symbolic-ref', '--quiet', '--short', `refs/remotes/${remote}/HEAD`],
+      repoRoot,
+      { allowNonZero: true },
+    );
+    if (r.code !== 0) return undefined;
+    const name = r.stdout.toString('utf8').trim();
+    return name || undefined;
+  }
+
   async listBranchesLocal(repoRoot: string): Promise<BranchInfo[]> {
     const r = await execGit(
       this.gitPath(),
