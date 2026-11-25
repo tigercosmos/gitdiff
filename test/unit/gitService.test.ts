@@ -869,3 +869,28 @@ describe('parseNameStatusZ', () => {
     ]);
   });
 });
+
+describe('GitService.remoteHead', function () {
+  this.timeout(20000);
+  const svc = new GitService();
+  let root: string;
+
+  before(() => {
+    root = makeRepo();
+    fs.writeFileSync(path.join(root, 'a.txt'), 'x\n');
+    commit(root, 'init');
+    const sha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root }).toString().trim();
+    // Remote-tracking branches without a network remote.
+    git(root, ['update-ref', 'refs/remotes/origin/main', sha]);
+    git(root, ['update-ref', 'refs/remotes/origin/trunk', sha]);
+  });
+
+  it('is undefined when origin/HEAD does not exist (remote added, not cloned)', async () => {
+    assert.strictEqual(await svc.remoteHead(root), undefined);
+  });
+
+  it('names the branch origin/HEAD points at', async () => {
+    git(root, ['symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/trunk']);
+    assert.strictEqual(await svc.remoteHead(root), 'origin/trunk');
+  });
+});

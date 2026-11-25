@@ -16,7 +16,7 @@
     "changed files",
     "merge"
   ],
-  "version": "0.11.1",
+  "version": "0.12.0",
   "publisher": "tigercosmos",
   "icon": "icons/activity.png",
   "engines": {
@@ -90,6 +90,11 @@
         "icon": "$(clear-all)"
       },
       {
+        "command": "gitdiff.openSettings",
+        "title": "GitDiff: Open Settings",
+        "icon": "$(gear)"
+      },
+      {
         "command": "gitdiff.changedFiles.viewAsTree",
         "title": "GitDiff: View Changed Files as Tree",
         "icon": "$(list-tree)"
@@ -144,6 +149,10 @@
         {
           "command": "gitdiff.changedFiles.revertFile",
           "when": "false"
+        },
+        {
+          "command": "gitdiff.changedFiles.clearTarget",
+          "when": "gitdiff.hasTarget && !gitdiff.targetIsDefault"
         }
       ],
       "explorer/context": [
@@ -205,13 +214,18 @@
         },
         {
           "command": "gitdiff.changedFiles.refresh",
-          "when": "view == gitdiff.changedFiles && gitdiff.hasTarget",
+          "when": "view == gitdiff.changedFiles",
           "group": "navigation@2"
         },
         {
           "command": "gitdiff.changedFiles.clearTarget",
-          "when": "view == gitdiff.changedFiles && gitdiff.hasTarget",
+          "when": "view == gitdiff.changedFiles && gitdiff.hasTarget && !gitdiff.targetIsDefault",
           "group": "navigation@3"
+        },
+        {
+          "command": "gitdiff.openSettings",
+          "when": "view == gitdiff.changedFiles",
+          "group": "navigation@4"
         }
       ]
     },
@@ -230,6 +244,11 @@
           "default": "",
           "scope": "machine",
           "description": "Absolute path to the git executable. Leave empty to resolve from PATH. Machine-scoped: workspace settings cannot override it (a workspace-controlled binary path would be a privilege-escalation vector)."
+        },
+        "gitdiff.defaultTarget": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Branch or ref the Changed Files view compares against until you pick a target. Leave empty to use the remote's default branch (the one `origin/HEAD` points at, usually `origin/main` or `origin/master`); without `origin/HEAD`, `origin/main`, then `origin/master`. Clearing a picked target returns the view to this default."
         },
         "gitdiff.openAllChanges.enabled": {
           "type": "boolean",

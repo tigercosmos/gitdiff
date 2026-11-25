@@ -92,6 +92,28 @@ describe('webview target bar', () => {
     assert.strictEqual(bar.textContent, '');
   });
 
+  it('marks a default target', () => {
+    const bar = targetBar(filesMessage({ targetLabel: 'origin/main', targetIsDefault: true }));
+    assert.strictEqual(bar.textContent, 'Comparing vs origin/main (default)');
+  });
+
+  it('says when the typed default target does not exist', () => {
+    const dom = runWebviewScript(HTML);
+    dom.send({
+      type: 'files',
+      hasTarget: false,
+      targetLabel: '',
+      files: [],
+      defaultTargetMissing: '<b>orgin/main</b>',
+    });
+    const note = dom.byId.get('default-missing') as FakeElement;
+    assert.strictEqual(note.style.display, '');
+    // Text, never markup: the name comes from a settings file.
+    assert.strictEqual(note.textContent, "Default target '<b>orgin/main</b>' not found.");
+    dom.send(filesMessage());
+    assert.strictEqual(note.style.display, 'none');
+  });
+
   // A repo path is an arbitrary filesystem string; it must reach the DOM as
   // text, never as markup.
   it('treats a markup-shaped repo path as text', () => {
