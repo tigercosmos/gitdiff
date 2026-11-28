@@ -120,10 +120,33 @@ When a GitDiff diff is the active editor:
 
 | Setting | Type | Default | Description |
 |---|---|---|---|
+| `gitdiff.branchComparison` | string | `"workingTree"` | For branch targets, use `workingTree` for editable comparisons against the branch tip, or `mergeBase` for committed changes equivalent to `git diff BRANCH...HEAD`. |
 | `gitdiff.defaultTarget` | string | `""` | Branch or ref the Changed Files view compares against until you pick a target. Empty uses the branch `origin/HEAD` points at (usually `origin/main` or `origin/master`); without `origin/HEAD`, `origin/main`, then `origin/master`. The view resolves it again on each refresh (the **Refresh** button, a save, or a commit or checkout). A fetch alone does not trigger a refresh. |
 | `gitdiff.commitPickerLimit` | number | `100` | Maximum number of recent commits shown in the commit picker (1–5000). |
 | `gitdiff.openAllChanges.enabled` | boolean | `true` | Show the **Open All Changes** button in the Changed Files view — one multi-file diff tab for every listed file (per-file tabs on VS Code < 1.87). Set to `false` to hide the button. |
 | `gitdiff.gitPath` | string | `""` | Absolute path to the `git` executable. Empty resolves from `PATH`. **Machine-scoped** — workspace settings cannot override it. |
+
+### Review committed branch changes
+
+To review the commits on your current branch since it diverged from a base branch,
+set `gitdiff.branchComparison` to `mergeBase`. For example, these settings show the
+same changes as `git diff main...HEAD`:
+
+```json
+{
+  "gitdiff.branchComparison": "mergeBase",
+  "gitdiff.defaultTarget": "main"
+}
+```
+
+The sidebar, content search, single-file diffs, and **Open All Changes** use the
+merge base and the committed contents at `HEAD`. Both editor panes are read-only;
+staged, unstaged, and untracked changes are excluded. The merge base and `HEAD`
+are recomputed on refresh and checkout.
+
+Use **Set Comparison Target** or `gitdiff.defaultTarget` to choose a different base,
+such as `origin/main`. An empty `defaultTarget` follows the remote's default branch.
+The default `workingTree` comparison mode keeps branch-tip comparisons editable.
 
 ## Requirements
 

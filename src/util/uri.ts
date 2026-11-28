@@ -10,10 +10,13 @@ export interface GitdiffParts {
   relPath: string;
   /**
    * Original branch name the user picked, if any. Refresh re-resolves this
-   * to the current tip SHA, so a diff opened "vs main" keeps tracking main.
+   * to the current tip SHA, or recomputes the merge base and HEAD when `head`
+   * is set for a branch review.
    * Absent for diffs opened against a specific commit (those stay pinned).
    */
   branch?: string;
+  /** Pinned right-hand commit when this URI belongs to a branch review. */
+  head?: string;
   /**
    * URI path to show instead of `relPath`. The multi-file diff editor marks an
    * entry as renamed when its two sides' paths differ, so that view sets this
@@ -36,6 +39,7 @@ export function partsToPathAndQuery(parts: GitdiffParts): { path: string; query:
   params.set('repo', parts.repoRoot);
   if (parts.displayPath !== undefined) params.set('rel', parts.relPath);
   if (parts.branch) params.set('branch', parts.branch);
+  if (parts.head) params.set('head', parts.head);
   return { path, query: params.toString() };
 }
 
@@ -47,12 +51,14 @@ export function pathAndQueryToParts(path: string, query: string): GitdiffParts {
     throw new Error('Missing ref or repo in gitdiff URI query');
   }
   const branch = params.get('branch') ?? undefined;
+  const head = params.get('head') ?? undefined;
   const rel = params.get('rel');
   return {
     ref,
     repoRoot,
     relPath: rel ?? (path.startsWith('/') ? path.slice(1) : path),
     ...(branch ? { branch } : {}),
+    ...(head ? { head } : {}),
     ...(rel !== null ? { displayPath: path } : {}),
   };
 }

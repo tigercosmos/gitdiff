@@ -232,6 +232,12 @@
     "configuration": {
       "title": "GitDiff",
       "properties": {
+        "gitdiff.branchComparison": {
+          "type": "string",
+          "enum": ["workingTree", "mergeBase"],
+          "default": "workingTree",
+          "description": "For branch targets, compare working files with the branch tip, or review committed changes from the merge base to HEAD (git diff BRANCH...HEAD)."
+        },
         "gitdiff.commitPickerLimit": {
           "type": "number",
           "default": 100,

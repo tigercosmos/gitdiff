@@ -7,10 +7,11 @@ import { DiffOpener } from './diffOpener';
 import { multiDiffAvailable, planAllChanges, ChangeEntry } from './allChanges';
 import { RefPicker } from './refPicker';
 import { decodeGitdiffUri, encodeGitdiffUri } from './util/uri';
-import { ChangedFilesProvider, ChangedFile, VIEW_ID, filterFiles } from './changedFilesProvider';
+import { ChangedFilesProvider, ChangedFile, VIEW_ID } from './changedFilesProvider';
 import { BlameHoverProvider } from './blameHoverProvider';
 import { CurrentLineBlameController } from './currentLineBlame';
 import { OPEN_COMMIT_DIFF_COMMAND } from './blameFormat';
+import { resolveBranchTarget } from './branchComparison';
 
 /** git's well-known empty-tree object; used as the "left" when a commit has no parent. */
 const EMPTY_TREE_SHA = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
@@ -147,7 +148,13 @@ export function activate(context: vscode.ExtensionContext): GitDiffExports {
         void vscode.window.showInformationMessage('No active GitDiff diff.');
         return;
       }
-      await runCompareForUri(active.right, 'pick', picker, opener, changedFiles);
+      const fileUri = active.right.scheme === GITDIFF_SCHEME
+        ? (() => {
+            const parts = decodeGitdiffUri(active.right);
+            return vscode.Uri.file(path.join(parts.repoRoot, parts.relPath));
+          })()
+        : active.right;
+      await runCompareForUri(fileUri, 'pick', picker, opener, changedFiles);
     }),
     // Refresh all open gitdiff: tabs when our config changes, since that may
     // alter what `git` resolves to (e.g., gitdiff.gitPath).
@@ -194,7 +201,7 @@ export function activate(context: vscode.ExtensionContext): GitDiffExports {
       async (file: ChangedFile) => {
         const target = changedFiles.getCurrentTarget();
         if (!target) return;
-        await opener.open(vscode.Uri.file(file.absPath), target);
+        await opener.open(vscode.Uri.file(file.absPath), target, file.origPath);
       },
     ),
     // On by default; `gitdiff.openAllChanges.enabled` can hide it. The `when`
@@ -214,7 +221,7 @@ export function activate(context: vscode.ExtensionContext): GitDiffExports {
         return;
       }
       // Same filter pipeline the sidebar uses, so "all" means "all you can see".
-      const { files } = await filterFiles(changedFiles.getAllFiles(), changedFiles.getFilter());
+      const { files } = await changedFiles.getFilteredFiles();
       if (files.length === 0) {
         void vscode.window.showInformationMessage('GitDiff: no changed files to show.');
         return;
@@ -255,7 +262,9 @@ export function activate(context: vscode.ExtensionContext): GitDiffExports {
                 displayPath: vscode.Uri.file(path.join(repoRoot, entry.left.relPath)).path,
               })
             : undefined,
-          entry.hasRight ? right : undefined,
+          entry.hasRight
+            ? (entry.right ? encodeGitdiffUri({ ...entry.right, displayPath: right.path }) : right)
+            : undefined,
         ];
       });
       await vscode.commands.executeCommand(
@@ -279,6 +288,10 @@ export function activate(context: vscode.ExtensionContext): GitDiffExports {
         const target = changedFiles.getCurrentTarget();
         const repoRoot = changedFiles.getCurrentRepoRoot();
         if (!target || !repoRoot) return;
+        if (target.head) {
+          void vscode.window.showInformationMessage('GitDiff: branch reviews show committed changes.');
+          return;
+        }
         const name = file.relPath.split('/').pop() ?? file.relPath;
         const choice = await vscode.window.showWarningMessage(
           `Revert "${name}" to ${target.display}? This discards your working-tree changes to this file.`,
@@ -332,7 +345,7 @@ export function activate(context: vscode.ExtensionContext): GitDiffExports {
   // it rather than show misleading content.
   void Promise.all(
     [...openGitdiffTabs()].map(({ uri, tab }) =>
-      refreshOrCloseUnsupported(git, provider, uri, tab).catch(() => {}),
+      refreshOrCloseUnsupported(git, provider, uri, tab, opener).catch(() => {}),
     ),
   );
 
@@ -474,10 +487,12 @@ async function dropUnsupportedAtTarget(
     while (next < entries.length) {
       const i = next++;
       const left = entries[i].left;
-      if (!left) continue;
       try {
-        const show = await git.showFileAtSha(left.repoRoot, left.ref, left.relPath);
-        if (show.exists && show.kind !== 'text') keep[i] = false;
+        for (const side of [left, entries[i].right]) {
+          if (!side) continue;
+          const show = await git.showFileAtSha(side.repoRoot, side.ref, side.relPath);
+          if (show.exists && show.kind !== 'text') keep[i] = false;
+        }
       } catch {
         // Let the content provider surface the error in the diff itself.
       }
@@ -515,6 +530,36 @@ async function refreshOrCloseUnsupported(
     parts = decodeGitdiffUri(uri);
   } catch {
     return;
+  }
+
+  if (parts.branch && tab && opener) {
+    try {
+      const target = await resolveBranchTarget(git, parts.repoRoot, parts.branch);
+      if (target.head || parts.head) {
+        if (target.ref !== parts.ref || target.head !== parts.head) {
+          const input = tab.input;
+          if (input instanceof vscode.TabInputTextDiff) {
+            const right = input.modified.scheme === GITDIFF_SCHEME
+              ? (() => {
+                  const p = decodeGitdiffUri(input.modified);
+                  return vscode.Uri.file(path.join(p.repoRoot, p.relPath));
+                })()
+              : input.modified;
+            const opened = await opener.open(right, target, parts.relPath);
+            if (opened) await vscode.window.tabGroups.close(tab);
+            return;
+          }
+        }
+        provider.refresh(uri);
+        return;
+      }
+    } catch {
+      // Keep the last good, pinned comparison during a transient repository state.
+      if (parts.head) {
+        provider.refresh(uri);
+        return;
+      }
+    }
   }
 
   let effectiveSha = parts.ref;

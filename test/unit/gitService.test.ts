@@ -360,7 +360,7 @@ describe('GitService', function () {
     try {
       assert.strictEqual(svc.relPath(canonRoot, link), '');
     } finally {
-      fs.rmSync(link, { force: true });
+      fs.unlinkSync(link);
     }
   });
 
