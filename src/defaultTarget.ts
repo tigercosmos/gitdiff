@@ -2,6 +2,9 @@ import type { GitService } from './gitService';
 import type { PickedRef } from './refPicker';
 
 /**
+ * The default target is a suggestion, never applied on its own: the target
+ * chooser shows it as its first row, so comparing against it is one click.
+ *
  * Refs tried, in order, when `gitdiff.defaultTarget` is empty and
  * `origin/HEAD` is missing (a repo whose remote was added rather than
  * cloned). `main` comes first because it is the default branch name for new
@@ -48,4 +51,34 @@ export async function resolveDefaultTarget(
     return { ref: sha, display: name, ...(branch ? { branch: name } : {}) };
   }
   return undefined;
+}
+
+/** What the target chooser shows for the default target. */
+export type DefaultTargetLookup =
+  /** The default resolved: offer it as a one-click row. */
+  | { kind: 'found'; picked: PickedRef }
+  /** A name typed in `gitdiff.defaultTarget` did not resolve: say so. */
+  | { kind: 'missing'; name: string };
+
+/**
+ * Find the default target for `repoRoot` from the raw `gitdiff.defaultTarget`
+ * value. Undefined when the setting is empty and none of `origin/HEAD`,
+ * `origin/main`, `origin/master` resolves (a repo with no remote) — that is
+ * normal, not an error, so there is nothing to show.
+ */
+export async function lookupDefaultTarget(
+  git: Pick<GitService, 'verifyRef' | 'isBranch' | 'remoteHead'>,
+  repoRoot: string,
+  setting: unknown,
+): Promise<DefaultTargetLookup | undefined> {
+  const typed = typeof setting === 'string' ? setting.trim() : '';
+  // origin/HEAD only matters when no name was typed in the setting.
+  const originHead = typed ? undefined : await git.remoteHead(repoRoot).catch(() => undefined);
+  const picked = await resolveDefaultTarget(
+    git,
+    repoRoot,
+    defaultTargetCandidates(typed, originHead),
+  );
+  if (picked) return { kind: 'found', picked };
+  return typed ? { kind: 'missing', name: typed } : undefined;
 }

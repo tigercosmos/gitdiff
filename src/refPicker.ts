@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { GitService, BranchInfo, CommitInfo } from './gitService';
+import { lookupDefaultTarget, DefaultTargetLookup } from './defaultTarget';
 
 interface BranchPickItem extends vscode.QuickPickItem {
   ref?: string;
@@ -87,8 +88,13 @@ export class RefPicker {
    * understands — and accept it directly without choosing a category first.
    */
   async pickAny(fileUri: vscode.Uri): Promise<PickedRef | undefined> {
-    const selection = await runTargetChooser(this.loadRecentCommits(fileUri));
+    const selection = await runTargetChooser(this.loadChooserExtras(fileUri));
     if (!selection) return undefined;
+    if (selection.defaultTarget) return selection.defaultTarget;
+    if (selection.openSettings) {
+      await vscode.commands.executeCommand('gitdiff.openSettings');
+      return undefined;
+    }
     if (selection.choice === 'branch') return this.pickBranch(fileUri);
     if (selection.choice === 'commit') return this.pickCommit(fileUri);
     if (selection.ref) {
@@ -99,18 +105,23 @@ export class RefPicker {
   }
 
   /**
-   * Newest commits on the current branch (HEAD), unfiltered by path — these
-   * become the shortcut rows in the chooser. Failures (not a repo, empty repo)
-   * are swallowed: the chooser is still useful without them, and the
+   * The chooser's asynchronous rows: the default target (`gitdiff.defaultTarget`,
+   * else the remote's default branch) and the newest commits on the current
+   * branch (HEAD), unfiltered by path. Failures (not a repo, empty repo) are
+   * swallowed: the chooser is still useful without these rows, and the
    * Branch…/Commit… sub-pickers report the real error if the user goes there.
    */
-  private async loadRecentCommits(fileUri: vscode.Uri): Promise<CommitInfo[]> {
-    try {
-      const repoRoot = await this.git.repoRoot(fileUri.fsPath);
-      return await this.git.listCommits(repoRoot, RECENT_COMMIT_COUNT);
-    } catch {
-      return [];
-    }
+  private loadChooserExtras(fileUri: vscode.Uri): ChooserExtras {
+    const root = this.git.repoRoot(fileUri.fsPath);
+    const setting = vscode.workspace.getConfiguration('gitdiff').get<string>('defaultTarget');
+    return {
+      recent: root
+        .then((repoRoot) => this.git.listCommits(repoRoot, RECENT_COMMIT_COUNT))
+        .catch(() => [] as CommitInfo[]),
+      defaultTarget: root
+        .then((repoRoot) => lookupDefaultTarget(this.git, repoRoot, setting))
+        .catch(() => undefined),
+    };
   }
 
   /**
@@ -154,7 +165,20 @@ export class RefPicker {
   }
 }
 
+/**
+ * Rows of the target chooser that load after it opens. They load separately,
+ * so a slow `git log` does not hold back the default-target row.
+ */
+export interface ChooserExtras {
+  recent: Promise<CommitInfo[]>;
+  defaultTarget: Promise<DefaultTargetLookup | undefined>;
+}
+
 export interface TargetChoiceItem extends vscode.QuickPickItem {
+  /** Set for the default-target row: the resolved target to use. */
+  defaultTarget?: PickedRef;
+  /** Set for the "default target not found" row: open the settings. */
+  openSettings?: boolean;
   /** Set for the fixed Branch…/Commit… rows. */
   choice?: 'branch' | 'commit';
   /** Set for the synthesized "compare with what you typed" row. */
@@ -172,14 +196,18 @@ export const RECENT_COMMIT_COUNT = 3;
  * Items for the target chooser. Pure — exported for unit tests. When the user
  * has typed something, a "Compare with <typed>" row is synthesized at the top
  * (leading-`-` input is excluded up front: it could be misparsed as an option
- * by downstream git calls, and verifyRef would reject it anyway). `recent`
- * holds the newest commits on the current branch; they get shortcut rows below
- * Branch…/Commit… so the common "diff against the last commit" case is one
- * click instead of two.
+ * by downstream git calls, and verifyRef would reject it anyway). The default
+ * target comes next — first of all when nothing is typed, so it is the row
+ * Enter picks — or, when the name in `gitdiff.defaultTarget` does not resolve,
+ * a row that says so and opens the settings. `recent` holds the newest
+ * commits on the current branch; they get shortcut rows below Branch…/Commit…
+ * so the common "diff against the last commit" case is one click instead of
+ * two.
  */
 export function buildTargetChoiceItems(
   typedRaw: string,
   recent: CommitInfo[] = [],
+  defaultTarget?: DefaultTargetLookup,
 ): TargetChoiceItem[] {
   const items: TargetChoiceItem[] = [];
   const typed = typedRaw.trim();
@@ -189,6 +217,19 @@ export function buildTargetChoiceItems(
       description: 'branch, tag, or commit — verify and use',
       typed,
       alwaysShow: true,
+    });
+  }
+  if (defaultTarget?.kind === 'found') {
+    items.push({
+      label: `$(star-full) ${defaultTarget.picked.display}`,
+      description: 'default target',
+      defaultTarget: defaultTarget.picked,
+    });
+  } else if (defaultTarget?.kind === 'missing') {
+    items.push({
+      label: `$(warning) Default target '${defaultTarget.name}' not found`,
+      description: 'change it in Settings',
+      openSettings: true,
     });
   }
   items.push(
@@ -217,12 +258,13 @@ export function buildTargetChoiceItems(
 
 /**
  * Drive the chooser with `createQuickPick` (not `showQuickPick`) so typing
- * can synthesize the direct-compare row live. The recent-commit rows arrive
- * asynchronously: the chooser shows immediately with the fixed rows and folds
- * them in when `recent` resolves, so a slow `git log` never delays the UI.
+ * can synthesize the direct-compare row live. The default-target and
+ * recent-commit rows arrive asynchronously: the chooser shows immediately
+ * with the fixed rows and folds each set in as it resolves, so a slow
+ * `git log` never delays the UI or the default row.
  */
 function runTargetChooser(
-  recent: Promise<CommitInfo[]>,
+  extras: ChooserExtras,
 ): Promise<TargetChoiceItem | undefined> {
   return new Promise<TargetChoiceItem | undefined>((resolve) => {
     const qp = vscode.window.createQuickPick<TargetChoiceItem>();
@@ -233,7 +275,9 @@ function runTargetChooser(
     qp.matchOnDescription = true;
     qp.matchOnDetail = true;
     qp.busy = true;
-    let commits: CommitInfo[] = [];
+    let recent: CommitInfo[] = [];
+    let defaultTarget: DefaultTargetLookup | undefined;
+    let pending = 2;
     let done = false;
     const finish = (result: TargetChoiceItem | undefined): void => {
       if (done) return;
@@ -242,23 +286,56 @@ function runTargetChooser(
       qp.dispose();
       resolve(result);
     };
-    qp.items = buildTargetChoiceItems('', commits);
-    qp.onDidChangeValue((value) => {
-      qp.items = buildTargetChoiceItems(value, commits);
-    });
+    const render = (value: string): void => {
+      qp.items = buildTargetChoiceItems(value, recent, defaultTarget);
+    };
+    // Rows that arrive late must not move the highlight from a row the user
+    // already moved to, or Enter would pick a row they did not choose. While
+    // the highlight is still on the first row, it goes to the new first row
+    // (the default target), as if the chooser had opened with it.
+    const renderKeepingActive = (): void => {
+      const active = qp.activeItems[0];
+      const moved = !!active && active !== qp.items[0];
+      render(qp.value);
+      if (!moved) return;
+      const key = choiceRowKey(active);
+      const same = qp.items.find((i) => key !== undefined && choiceRowKey(i) === key);
+      if (same) qp.activeItems = [same];
+    };
+    const loaded = (): void => {
+      if (--pending === 0) qp.busy = false;
+    };
+    render('');
+    qp.onDidChangeValue(render);
     qp.onDidAccept(() => {
       const picked = qp.activeItems[0];
       if (picked) finish(picked);
     });
     qp.onDidHide(() => finish(undefined));
     qp.show();
-    void recent.then((loaded) => {
+    void extras.defaultTarget.then((result) => {
       if (done) return;
-      commits = loaded;
-      qp.items = buildTargetChoiceItems(qp.value, commits);
-      qp.busy = false;
+      defaultTarget = result;
+      if (result) renderKeepingActive();
+      loaded();
+    });
+    void extras.recent.then((result) => {
+      if (done) return;
+      recent = result;
+      if (result.length > 0) renderKeepingActive();
+      loaded();
     });
   });
+}
+
+/** Identifies a chooser row across re-renders, which build new item objects. */
+export function choiceRowKey(item: TargetChoiceItem): string | undefined {
+  if (item.typed !== undefined) return `typed:${item.typed}`;
+  if (item.defaultTarget) return 'default';
+  if (item.openSettings) return 'settings';
+  if (item.choice) return `choice:${item.choice}`;
+  if (item.ref) return `ref:${item.ref}`;
+  return undefined;
 }
 
 function shortenSha(sha: string): string {

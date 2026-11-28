@@ -26,7 +26,7 @@ const fakeGit = {
   listWorktrees: async () => [],
 };
 
-function setup(): { provider: any; posted: Msg[] } {
+function setup(git: object = fakeGit): { provider: any; posted: Msg[] } {
   const posted: Msg[] = [];
   const memento = {
     store: new Map<string, unknown>(),
@@ -37,7 +37,7 @@ function setup(): { provider: any; posted: Msg[] } {
       this.store.set(key, value);
     },
   };
-  const provider = new ChangedFilesProvider(fakeGit, memento, stub.Uri.file('/ext'));
+  const provider = new ChangedFilesProvider(git, memento, stub.Uri.file('/ext'));
   provider.resolveWebviewView({
     webview: {
       options: {},
@@ -63,6 +63,57 @@ function lastFilesMessage(posted: Msg[]): Msg {
 }
 
 const TARGET = { ref: 'a'.repeat(40), display: 'upstream/master', branch: 'upstream/master' };
+
+describe('ChangedFilesProvider failed quiet refresh', () => {
+  // A first load shows "Loading…". If an automatic refresh supersedes it and
+  // then fails, it must still clear that state: the first load's result is
+  // discarded, so nothing else would.
+  it('clears "Loading…" when there is no earlier list to keep', async () => {
+    let release!: () => void;
+    let calls = 0;
+    const git = {
+      ...fakeGit,
+      listChangedPaths: async () => {
+        calls++;
+        if (calls === 1) {
+          await new Promise<void>((r) => (release = r));
+          return [{ relPath: 'src/a.ts', status: 'M' as const }];
+        }
+        throw new Error('index.lock exists');
+      },
+    };
+    const { provider, posted } = setup(git);
+    const first = provider.setTarget(TARGET, '/repo');
+    await new Promise((r) => setImmediate(r));
+    assert.strictEqual(lastFilesMessage(posted).loading, true);
+    await provider.refresh({ quiet: true });
+    release();
+    await first;
+    const msg = lastFilesMessage(posted);
+    assert.ok(!msg.loading, 'expected the loading state to be cleared');
+    assert.deepStrictEqual(msg.files, []);
+    provider.dispose();
+  });
+
+  it('keeps the last good list when there is one', async () => {
+    let fail = false;
+    const git = {
+      ...fakeGit,
+      listChangedPaths: async () => {
+        if (fail) throw new Error('index.lock exists');
+        return [{ relPath: 'src/a.ts', status: 'M' as const }];
+      },
+    };
+    const { provider, posted } = setup(git);
+    await provider.setTarget(TARGET, '/repo');
+    const before = posted.length;
+    fail = true;
+    await provider.refresh({ quiet: true });
+    assert.strictEqual(posted.slice(before).filter((m) => m.type === 'files').length, 0);
+    assert.strictEqual(provider.getAllFiles().length, 1);
+    provider.dispose();
+  });
+});
 
 describe('ChangedFilesProvider target messages', () => {
   it('names the target repo so a cross-repo pin is visible in the view', async () => {

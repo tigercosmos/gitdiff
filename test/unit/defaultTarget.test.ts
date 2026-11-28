@@ -1,27 +1,10 @@
 import * as assert from 'assert';
-
-// `changedFilesProvider.ts` imports `vscode` at module load time. Stub it
-// before requiring the module — same pattern as the other unit tests.
-const Module = require('module');
-const originalResolve = Module._resolveFilename;
-Module._resolveFilename = function (request: string, ...rest: unknown[]) {
-  if (request === 'vscode') {
-    return require.resolve('./_vscode-stub-full');
-  }
-  return originalResolve.call(this, request, ...rest);
-};
-
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const stub = require('./_vscode-stub-full');
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const { ChangedFilesProvider } = require('../../src/changedFilesProvider');
 import {
   AUTO_DEFAULT_TARGETS,
   defaultTargetCandidates,
+  lookupDefaultTarget,
   resolveDefaultTarget,
 } from '../../src/defaultTarget';
-
-type Msg = Record<string, unknown>;
 
 /** A repo whose refs are `refs` (name → SHA); every name in `branches` is a branch. */
 function fakeGit(
@@ -30,17 +13,13 @@ function fakeGit(
   originHead?: string,
 ) {
   return {
-    remoteHead: async () => originHead,
-    gitDir: async (repoRoot: string) => `${repoRoot}/.git`,
-    listChangedPaths: async () => [{ relPath: 'src/a.ts', status: 'M' as const }],
-    listUntrackedPaths: async () => [],
-    listWorktrees: async () => [],
-    verifyRef: async (_root: string, name: string) => {
+    remoteHead: async (): Promise<string | undefined> => originHead,
+    verifyRef: async (_root: string, name: string): Promise<string> => {
       const sha = refs[name];
       if (!sha) throw new Error(`'${name}' is not a valid revision`);
       return sha;
     },
-    isBranch: async (_root: string, name: string) => branches.includes(name),
+    isBranch: async (_root: string, name: string): Promise<boolean> => branches.includes(name),
   };
 }
 
@@ -104,173 +83,13 @@ describe('resolveDefaultTarget', () => {
   });
 });
 
-describe('ChangedFilesProvider default target', () => {
-  const originalGetConfiguration = stub.workspace.getConfiguration;
-  afterEach(() => {
-    stub.workspace.getConfiguration = originalGetConfiguration;
-  });
-
-  function setDefaultTargetSetting(value: string): void {
-    stub.workspace.getConfiguration = () => ({
-      get: (key: string, fallback?: unknown) => (key === 'defaultTarget' ? value : fallback),
-    });
-  }
-
-  function setup(
-    git: ReturnType<typeof fakeGit>,
-    seed: Record<string, unknown> = {},
-    findRoot: () => Promise<string | undefined> = async () => '/repo',
-  ) {
-    const posted: Msg[] = [];
-    const store = new Map<string, unknown>(Object.entries(seed));
-    const memento = {
-      get: (key: string) => store.get(key),
-      update: async (key: string, value: unknown) => {
-        store.set(key, value);
-      },
-    };
-    const provider = new ChangedFilesProvider(
-      git,
-      memento,
-      stub.Uri.file('/ext'),
-      findRoot,
-    );
-    provider.resolveWebviewView({
-      webview: {
-        options: {},
-        html: '',
-        cspSource: 'vscode-webview://test',
-        onDidReceiveMessage: () => ({ dispose() {} }),
-        postMessage: (m: Msg) => {
-          posted.push(m);
-          return Promise.resolve(true);
-        },
-      },
-      visible: true,
-      onDidDispose: () => ({ dispose() {} }),
-      onDidChangeVisibility: () => ({ dispose() {} }),
-    });
-    return { provider, posted, store };
-  }
-
-  function lastFiles(posted: Msg[]): Msg {
-    const files = posted.filter((m) => m.type === 'files');
-    assert.ok(files.length > 0, 'expected a files message');
-    return files[files.length - 1];
-  }
-
-  it('compares against origin/main when no target was picked', async () => {
-    const { provider, posted, store } = setup(fakeGit({ 'origin/main': MAIN }));
-    await provider.refresh();
-    assert.deepStrictEqual(provider.getCurrentTarget(), {
-      ref: MAIN,
-      display: 'origin/main',
-      branch: 'origin/main',
-    });
-    assert.strictEqual(provider.getCurrentRepoRoot(), '/repo');
-    assert.strictEqual(provider.isDefaultTarget(), true);
-    const msg = lastFiles(posted);
-    assert.strictEqual(msg.hasTarget, true);
-    assert.strictEqual(msg.targetLabel, 'origin/main');
-    assert.strictEqual(msg.targetIsDefault, true);
-    // The default is resolved, not stored: a later setting change must win.
-    assert.strictEqual(store.get('gitdiff.changedFiles.target'), undefined);
-    provider.dispose();
-  });
-
+describe('lookupDefaultTarget', () => {
   it('follows origin/HEAD when both origin/main and origin/master exist', async () => {
-    const { provider } = setup(
-      fakeGit({ 'origin/main': MAIN, 'origin/master': MASTER }, undefined, 'origin/master'),
-    );
-    await provider.refresh();
-    assert.deepStrictEqual(provider.getCurrentTarget(), {
-      ref: MASTER,
-      display: 'origin/master',
-      branch: 'origin/master',
+    const git = fakeGit({ 'origin/main': MAIN, 'origin/master': MASTER }, undefined, 'origin/master');
+    assert.deepStrictEqual(await lookupDefaultTarget(git, '/repo', ''), {
+      kind: 'found',
+      picked: { ref: MASTER, display: 'origin/master', branch: 'origin/master' },
     });
-    provider.dispose();
-  });
-
-  it('uses the branch typed in gitdiff.defaultTarget instead', async () => {
-    setDefaultTargetSetting('develop');
-    const { provider } = setup(fakeGit({ 'origin/main': MAIN, develop: DEVELOP }, undefined, 'origin/main'));
-    await provider.refresh();
-    assert.strictEqual(provider.getCurrentTarget()?.display, 'develop');
-    assert.strictEqual(provider.getCurrentTarget()?.ref, DEVELOP);
-    provider.dispose();
-  });
-
-  it('shows no target when the typed branch does not exist', async () => {
-    setDefaultTargetSetting('nope');
-    const { provider, posted } = setup(fakeGit({ 'origin/main': MAIN }));
-    await provider.refresh();
-    assert.strictEqual(provider.getCurrentTarget(), undefined);
-    assert.strictEqual(lastFiles(posted).hasTarget, false);
-    provider.dispose();
-  });
-
-  it('follows the default branch tip on refresh', async () => {
-    const refs: Record<string, string> = { 'origin/main': MAIN };
-    const { provider } = setup(fakeGit(refs));
-    await provider.refresh();
-    refs['origin/main'] = MASTER;
-    await provider.refresh();
-    assert.strictEqual(provider.getCurrentTarget()?.ref, MASTER);
-    provider.dispose();
-  });
-
-  it('keeps the last default when an automatic refresh resolves nothing', async () => {
-    const refs: Record<string, string> = { 'origin/main': MAIN };
-    const { provider } = setup(fakeGit(refs));
-    await provider.refresh();
-    delete refs['origin/main'];
-    await provider.refresh({ quiet: true });
-    assert.strictEqual(provider.getCurrentTarget()?.ref, MAIN);
-    // A refresh the user asked for reports the real state.
-    await provider.refresh();
-    assert.strictEqual(provider.getCurrentTarget(), undefined);
-    provider.dispose();
-  });
-
-  it('a picked target wins over the default, and clearing it returns to the default', async () => {
-    const { provider, posted } = setup(fakeGit({ 'origin/main': MAIN }));
-    await provider.refresh();
-    const picked = { ref: DEVELOP, display: 'feature', branch: 'feature' };
-    await provider.setTarget(picked, '/repo');
-    assert.deepStrictEqual(provider.getCurrentTarget(), picked);
-    assert.strictEqual(provider.isDefaultTarget(), false);
-    assert.strictEqual(lastFiles(posted).targetIsDefault, undefined);
-
-    await provider.clearTarget();
-    assert.strictEqual(provider.getCurrentTarget()?.display, 'origin/main');
-    assert.strictEqual(provider.isDefaultTarget(), true);
-    provider.dispose();
-  });
-
-  it('names a typed default that does not resolve, and only that', async () => {
-    setDefaultTargetSetting('orgin/main');
-    const typo = setup(fakeGit({ 'origin/main': MAIN }));
-    await typo.provider.refresh();
-    assert.strictEqual(lastFiles(typo.posted).defaultTargetMissing, 'orgin/main');
-    typo.provider.dispose();
-
-    // No remote at all with an empty setting is normal, not an error.
-    stub.workspace.getConfiguration = originalGetConfiguration;
-    const bare = setup(fakeGit({}));
-    await bare.provider.refresh();
-    assert.strictEqual(lastFiles(bare.posted).hasTarget, false);
-    assert.strictEqual(lastFiles(bare.posted).defaultTargetMissing, undefined);
-    bare.provider.dispose();
-  });
-
-  it('has no target, and does not throw, when the repo lookup fails', async () => {
-    const { provider, posted } = setup(fakeGit({ 'origin/main': MAIN }), {}, async () => {
-      throw new Error('not a git repository');
-    });
-    await provider.refresh();
-    assert.strictEqual(provider.getCurrentTarget(), undefined);
-    assert.strictEqual(lastFiles(posted).hasTarget, false);
-    provider.dispose();
   });
 
   it('falls back to origin/main when reading origin/HEAD fails', async () => {
@@ -278,121 +97,35 @@ describe('ChangedFilesProvider default target', () => {
     git.remoteHead = async () => {
       throw new Error('git crashed');
     };
-    const { provider } = setup(git);
-    await provider.refresh();
-    assert.strictEqual(provider.getCurrentTarget()?.display, 'origin/main');
-    provider.dispose();
+    const found = await lookupDefaultTarget(git, '/repo', undefined);
+    assert.strictEqual(found?.kind === 'found' && found.picked.display, 'origin/main');
   });
 
-  it('clears old rows when the tip moves and the automatic listing then fails', async () => {
-    const refs: Record<string, string> = { 'origin/main': MAIN };
-    const git = fakeGit(refs);
-    const { provider, posted } = setup(git);
-    await provider.refresh();
-    assert.strictEqual((lastFiles(posted).files as unknown[]).length, 1);
-    refs['origin/main'] = MASTER;
-    git.listChangedPaths = async () => {
-      throw new Error('index.lock exists');
+  it('uses the name typed in the setting, ignoring origin/HEAD', async () => {
+    let askedHead = false;
+    const git = fakeGit({ 'origin/main': MAIN, develop: DEVELOP }, undefined, 'origin/main');
+    git.remoteHead = async () => {
+      askedHead = true;
+      return 'origin/main';
     };
-    await provider.refresh({ quiet: true });
-    const msg = lastFiles(posted);
-    assert.strictEqual(provider.getCurrentTarget()?.ref, MASTER);
-    assert.deepStrictEqual(msg.files, []);
-    assert.strictEqual(msg.hasTarget, true);
-    assert.deepStrictEqual(provider.getAllFiles(), []);
-    provider.dispose();
-  });
-
-  it('keeps the last list when an automatic listing fails on an unchanged target', async () => {
-    const git = fakeGit({ 'origin/main': MAIN });
-    const { provider, posted } = setup(git);
-    await provider.refresh();
-    const before = posted.length;
-    git.listChangedPaths = async () => {
-      throw new Error('index.lock exists');
-    };
-    await provider.refresh({ quiet: true });
-    assert.strictEqual(posted.length, before, 'a quiet failure must not post');
-    assert.strictEqual(provider.getAllFiles().length, 1);
-    provider.dispose();
-  });
-
-  it('a target picked while the default is resolving is not overwritten', async () => {
-    const git = fakeGit({ 'origin/main': MAIN });
-    let release!: () => void;
-    const gate = new Promise<void>((r) => (release = r));
-    const verify = git.verifyRef;
-    git.verifyRef = async (root: string, name: string) => {
-      await gate;
-      return verify(root, name);
-    };
-    const { provider } = setup(git);
-    const pending = provider.refresh();
-    const picked = { ref: DEVELOP, display: 'feature', branch: 'feature' };
-    // setTarget's own refresh skips default resolution for a picked target.
-    await provider.setTarget(picked, '/repo');
-    release();
-    await pending;
-    assert.deepStrictEqual(provider.getCurrentTarget(), picked);
-    assert.strictEqual(provider.isDefaultTarget(), false);
-    provider.dispose();
-  });
-
-  it('an older default resolution that lands last does not win', async () => {
-    const git = fakeGit({ 'origin/main': MAIN, develop: DEVELOP });
-    const gates: Array<() => void> = [];
-    const verify = git.verifyRef;
-    git.verifyRef = async (root: string, name: string) => {
-      await new Promise<void>((r) => gates.push(r));
-      return verify(root, name);
-    };
-    // The constructor starts its own resolution too (no target persisted),
-    // so the gates hold: constructor, `first`, then `second`.
-    const { provider } = setup(git);
-    const first = provider.refresh(); // resolves origin/main
-    await new Promise((r) => setImmediate(r));
-    setDefaultTargetSetting('develop');
-    const second = provider.refresh(); // resolves develop
-    await new Promise((r) => setImmediate(r));
-    assert.strictEqual(gates.length, 3);
-    gates[2](); // the newest one finishes first…
-    await second;
-    gates[0](); // …then the older ones land
-    gates[1]();
-    await first;
-    await new Promise((r) => setImmediate(r));
-    assert.strictEqual(provider.getCurrentTarget()?.display, 'develop');
-    provider.dispose();
-  });
-
-  it('resolves the default at startup without listing files', async () => {
-    const git = fakeGit({ 'origin/main': MAIN });
-    let listings = 0;
-    git.listChangedPaths = async () => {
-      listings++;
-      return [{ relPath: 'src/a.ts', status: 'M' as const }];
-    };
-    const posted: Msg[] = [];
-    const memento = { get: () => undefined, update: async () => {} };
-    const provider = new ChangedFilesProvider(git, memento, stub.Uri.file('/ext'), async () => '/repo');
-    const changes: number[] = [];
-    provider.onDidChangeTarget(() => changes.push(1));
-    for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
-    assert.strictEqual(provider.getCurrentTarget()?.display, 'origin/main');
-    assert.strictEqual(changes.length, 1, 'the title-bar context keys must hear about it');
-    assert.strictEqual(listings, 0);
-    assert.deepStrictEqual(posted, []);
-    provider.dispose();
-  });
-
-  it('keeps a target persisted from an earlier session', async () => {
-    const persisted = { ref: DEVELOP, display: 'feature', branch: 'feature', repoRoot: '/repo' };
-    const { provider } = setup(fakeGit({ 'origin/main': MAIN }), {
-      'gitdiff.changedFiles.target': persisted,
+    const found = await lookupDefaultTarget(git, '/repo', ' develop ');
+    assert.deepStrictEqual(found, {
+      kind: 'found',
+      picked: { ref: DEVELOP, display: 'develop', branch: 'develop' },
     });
-    await provider.refresh();
-    assert.strictEqual(provider.getCurrentTarget()?.display, 'feature');
-    assert.strictEqual(provider.isDefaultTarget(), false);
-    provider.dispose();
+    assert.strictEqual(askedHead, false);
+  });
+
+  it('reports a typed name that does not resolve', async () => {
+    const git = fakeGit({ 'origin/main': MAIN });
+    assert.deepStrictEqual(await lookupDefaultTarget(git, '/repo', 'orgin/main'), {
+      kind: 'missing',
+      name: 'orgin/main',
+    });
+  });
+
+  // A repo with no remote and an empty setting is normal: no row, no warning.
+  it('finds nothing, without a warning, when the setting is empty and no remote exists', async () => {
+    assert.strictEqual(await lookupDefaultTarget(fakeGit({}), '/repo', ''), undefined);
   });
 });
