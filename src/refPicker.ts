@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { GitService, BranchInfo, CommitInfo } from './gitService';
+import { resolveBranchTarget } from './branchComparison';
 
 interface BranchPickItem extends vscode.QuickPickItem {
   ref?: string;
@@ -23,6 +24,8 @@ export interface PickedRef {
   display: string;
   /** Original branch name if the user picked from the branch list. */
   branch?: string;
+  /** Pinned HEAD for a three-dot branch review; absent for working-tree diffs. */
+  head?: string;
 }
 
 export class RefPicker {
@@ -54,8 +57,7 @@ export class RefPicker {
     });
     if (!picked?.ref) return undefined;
     try {
-      const sha = await this.git.verifyRef(repoRoot, picked.ref);
-      return { ref: sha, display: picked.ref, branch: picked.ref };
+      return await resolveBranchTarget(this.git, repoRoot, picked.ref);
     } catch (err) {
       void vscode.window.showErrorMessage(
         err instanceof Error ? err.message : `GitDiff: cannot resolve ${picked.ref}`,
@@ -142,7 +144,12 @@ export class RefPicker {
     }
     const isBranch = await this.git.isBranch(repoRoot, typed).catch(() => false);
     if (isBranch) {
-      return { ref: full, display: typed, branch: typed };
+      try {
+        return await resolveBranchTarget(this.git, repoRoot, typed);
+      } catch (err) {
+        void vscode.window.showErrorMessage(err instanceof Error ? err.message : String(err));
+        return undefined;
+      }
     }
     // A SHA prefix reads better shortened from the *full* SHA; any other
     // revision (tag, HEAD~2, …) is most recognizable as what the user typed.

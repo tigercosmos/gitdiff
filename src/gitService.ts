@@ -533,6 +533,15 @@ export class GitService {
     return r.stdout.toString('utf8').trim();
   }
 
+  /** Common ancestor of two verified commits, as used by `git diff A...B`. */
+  async mergeBase(repoRoot: string, left: string, right: string): Promise<string> {
+    if (left.startsWith('-') || right.startsWith('-')) {
+      throw new Error('GitDiff: refs cannot begin with a dash.');
+    }
+    const r = await execGit(this.gitPath(), ['merge-base', left, right], repoRoot);
+    return r.stdout.toString('utf8').trim();
+  }
+
   /**
    * Returns true iff `relPath` exists in the tree of `ref`. Distinguishes
    * "path not present" (false) from other failures (which throw). Uses
@@ -579,6 +588,7 @@ export class GitService {
   async listChangedPaths(
     repoRoot: string,
     ref: string,
+    head?: string,
   ): Promise<
     Array<{ relPath: string; status: 'M' | 'A' | 'D' | 'R' | 'C' | 'T' | 'U'; origPath?: string }>
   > {
@@ -592,7 +602,7 @@ export class GitService {
     // pinning detection on regardless of config widened that coupling.
     const r = await execGit(
       this.gitPath(),
-      ['diff', '--name-status', '-z', '--end-of-options', ref],
+      ['diff', '--name-status', '-z', '--end-of-options', ref, ...(head ? [head] : []), '--'],
       repoRoot,
     );
     return parseNameStatusZ(r.stdout.toString('utf8'));

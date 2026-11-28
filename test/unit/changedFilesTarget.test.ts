@@ -104,6 +104,37 @@ describe('ChangedFilesProvider target messages', () => {
   });
 });
 
+describe('ChangedFilesProvider committed content search', () => {
+  it('searches the pinned HEAD even when no working-tree file exists', async () => {
+    const reads: unknown[] = [];
+    const target = { ref: 'a'.repeat(40), head: 'b'.repeat(40), display: 'main...HEAD', repoRoot: '/absent' };
+    const store = new Map<string, unknown>([
+      ['gitdiff.changedFiles.target', target],
+      ['gitdiff.changedFiles.filter', { search: 'committed contents' }],
+    ]);
+    const git = {
+      ...fakeGit,
+      showFileAtSha: async (...args: unknown[]) => {
+        reads.push(args);
+        return { exists: true, kind: 'text', bytes: Buffer.from('committed contents\n') };
+      },
+    };
+    const provider = new ChangedFilesProvider(git, {
+      get: (key: string) => store.get(key),
+      update: async (key: string, value: unknown) => { store.set(key, value); },
+    }, stub.Uri.file('/ext'));
+    try {
+      await provider.refresh();
+      const filtered = await provider.getFilteredFiles();
+      assert.deepStrictEqual(filtered.files.map((file: { relPath: string }) => file.relPath), ['src/a.ts']);
+      assert.ok(reads.length > 0);
+      assert.deepStrictEqual(reads[0], ['/absent', target.head, 'src/a.ts']);
+    } finally {
+      provider.dispose();
+    }
+  });
+});
+
 describe('ChangedFilesProvider view mode', () => {
   function setupWith(seed: Record<string, unknown>): { provider: any; posted: Msg[]; store: Map<string, unknown> } {
     const posted: Msg[] = [];

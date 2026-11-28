@@ -69,7 +69,9 @@ export class ActiveDiffTracker implements vscode.Disposable {
     const pair = this.getActiveGitdiffPair();
     if (!pair) return undefined;
     try {
-      const { repoRoot, relPath } = decodeGitdiffUri(pair.left);
+      const { repoRoot, relPath } = decodeGitdiffUri(
+        pair.right.scheme === GITDIFF_SCHEME ? pair.right : pair.left,
+      );
       return { repoRoot, relPath };
     } catch {
       return undefined;

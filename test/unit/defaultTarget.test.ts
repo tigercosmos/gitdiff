@@ -385,6 +385,65 @@ describe('ChangedFilesProvider default target', () => {
     provider.dispose();
   });
 
+  it('reviews the automatic default from its merge base and tracks HEAD without persisting it', async () => {
+    stub.workspace.getConfiguration = () => ({
+      get: (key: string, fallback?: unknown) => key === 'branchComparison' ? 'mergeBase' : fallback,
+    });
+    const refs: Record<string, string> = { 'origin/main': MAIN, HEAD: DEVELOP };
+    const base = 'd'.repeat(40);
+    const listings: string[][] = [];
+    const git = {
+      ...fakeGit(refs),
+      mergeBase: async () => base,
+      listChangedPaths: async (...args: string[]) => {
+        listings.push(args);
+        return [{ relPath: 'src/a.ts', status: 'M' as const }];
+      },
+    };
+    const { provider, posted, store } = setup(git);
+    try {
+      await provider.refresh();
+      assert.deepStrictEqual(provider.getCurrentTarget(), {
+        ref: base, display: 'origin/main...HEAD', branch: 'origin/main', head: DEVELOP,
+      });
+      assert.strictEqual(provider.isDefaultTarget(), true);
+      assert.deepStrictEqual(listings.at(-1), ['/repo', base, DEVELOP]);
+      assert.strictEqual(lastFiles(posted).targetIsDefault, true);
+      assert.strictEqual(lastFiles(posted).readOnly, true);
+      assert.strictEqual(store.get('gitdiff.changedFiles.target'), undefined);
+
+      refs.HEAD = MASTER;
+      await provider.refresh();
+      assert.strictEqual(provider.getCurrentTarget()?.head, MASTER);
+      assert.strictEqual(provider.isDefaultTarget(), true);
+      assert.deepStrictEqual(listings.at(-1), ['/repo', base, MASTER]);
+      assert.strictEqual(store.get('gitdiff.changedFiles.target'), undefined);
+    } finally {
+      provider.dispose();
+    }
+  });
+
+  it('drops the pinned HEAD when a picked branch returns to working-tree mode', async () => {
+    let mode = 'mergeBase';
+    stub.workspace.getConfiguration = () => ({
+      get: (key: string, fallback?: unknown) => key === 'branchComparison' ? mode : fallback,
+    });
+    const git = {
+      ...fakeGit({ main: MAIN, HEAD: DEVELOP }),
+      mergeBase: async () => 'd'.repeat(40),
+    };
+    const { provider } = setup(git);
+    try {
+      await provider.setTarget({ ref: MAIN, display: 'main', branch: 'main' }, '/repo');
+      assert.strictEqual(provider.getCurrentTarget()?.head, DEVELOP);
+      mode = 'workingTree';
+      await provider.refresh();
+      assert.deepStrictEqual(provider.getCurrentTarget(), { ref: MAIN, display: 'main', branch: 'main' });
+    } finally {
+      provider.dispose();
+    }
+  });
+
   it('keeps a target persisted from an earlier session', async () => {
     const persisted = { ref: DEVELOP, display: 'feature', branch: 'feature', repoRoot: '/repo' };
     const { provider } = setup(fakeGit({ 'origin/main': MAIN }), {

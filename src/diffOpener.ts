@@ -8,7 +8,9 @@ export class DiffOpener {
   constructor(private readonly git: GitService) {}
 
   /**
-   * Open a diff comparing `fileUri` (working-tree, editable) against `picked`.
+   * Open a diff comparing `fileUri` against `picked`. The right pane is the
+   * editable working file, or the pinned committed contents when `picked.head`
+   * is set for a branch review.
    * The picker has already resolved the ref to a full SHA. If `picked.branch`
    * is set, the URI carries the branch name so refresh can re-resolve to the
    * branch's current tip.
@@ -33,10 +35,18 @@ export class DiffOpener {
       void vscode.window.showErrorMessage('GitDiff: Not a git repository.');
       return undefined;
     }
-    const relPath = relPathAtTarget ?? this.git.relPath(repoRoot, fileUri.fsPath);
+    const rightPath = this.git.relPath(repoRoot, fileUri.fsPath);
+    const relPath = relPathAtTarget ?? rightPath;
     const sha = picked.ref;
 
     const show = await this.git.showFileAtSha(repoRoot, sha, relPath);
+    if (picked.head) {
+      const rightShow = await this.git.showFileAtSha(repoRoot, picked.head, rightPath);
+      if (rightShow.exists && rightShow.kind !== 'text') {
+        void vscode.window.showWarningMessage(`GitDiff: ${rightPath} at HEAD is not UTF-8 text.`);
+        return undefined;
+      }
+    }
     if (show.exists && show.kind === 'binary') {
       void vscode.window.showWarningMessage(
         `GitDiff: ${path.basename(fileUri.fsPath)} at ${picked.display} is binary — diff not supported in v1.`,
@@ -54,12 +64,16 @@ export class DiffOpener {
       repoRoot,
       relPath,
       ...(picked.branch ? { branch: picked.branch } : {}),
+      ...(picked.head ? { head: picked.head, displayPath: fileUri.path } : {}),
     });
     const fileName = path.basename(fileUri.fsPath);
     const title = show.exists
       ? `${fileName} (vs ${picked.display})`
       : `${fileName} (new vs ${picked.display})`;
-    await vscode.commands.executeCommand('vscode.diff', left, fileUri, title, {
+    const right = picked.head
+      ? encodeGitdiffUri({ ref: picked.head, repoRoot, relPath: rightPath, displayPath: fileUri.path })
+      : fileUri;
+    await vscode.commands.executeCommand('vscode.diff', left, right, title, {
       preview: false,
     });
     return repoRoot;

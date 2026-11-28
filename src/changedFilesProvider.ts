@@ -7,6 +7,7 @@ import { compilePatterns } from './util/glob';
 import { compileSearch } from './util/search';
 import { defaultTargetCandidates, resolveDefaultTarget } from './defaultTarget';
 import type { PickedRef } from './refPicker';
+import { resolveBranchTarget } from './branchComparison';
 
 export type ChangeStatus = 'M' | 'A' | 'D' | 'R' | 'C' | 'T' | 'U' | '?';
 
@@ -51,10 +52,7 @@ export const DEFAULT_FILTER: FilterState = {
   useRegex: false,
 };
 
-interface PersistedTarget {
-  ref: string;
-  display: string;
-  branch?: string;
+interface PersistedTarget extends PickedRef {
   repoRoot: string;
 }
 
@@ -92,6 +90,7 @@ interface FilesMessage {
    * resolve, so the empty state can say why it is empty.
    */
   defaultTargetMissing?: string;
+  readOnly?: boolean;
 }
 
 interface InitMessage {
@@ -324,6 +323,7 @@ export class ChangedFilesProvider implements vscode.WebviewViewProvider, vscode.
       ref: this.target.ref,
       display: this.target.display,
       ...(this.target.branch ? { branch: this.target.branch } : {}),
+      ...(this.target.head ? { head: this.target.head } : {}),
     };
   }
 
@@ -358,16 +358,26 @@ export class ChangedFilesProvider implements vscode.WebviewViewProvider, vscode.
     if (!repoRoot) {
       repoRoot = await this.findDefaultRepoRoot().catch(() => undefined);
     }
-    const setting = vscode.workspace.getConfiguration('gitdiff').get<string>('defaultTarget');
+    const config = vscode.workspace.getConfiguration('gitdiff', repoRoot ? vscode.Uri.file(repoRoot) : undefined);
+    const setting = config.get<string>('defaultTarget');
     // origin/HEAD only matters when no branch was typed in the setting.
     const originHead =
       repoRoot && !setting?.trim()
         ? await this.git.remoteHead(repoRoot).catch(() => undefined)
         : undefined;
     const candidates = defaultTargetCandidates(setting, originHead);
-    const picked = repoRoot
+    let picked = repoRoot
       ? await resolveDefaultTarget(this.git, repoRoot, candidates)
       : undefined;
+    if (picked?.branch && repoRoot && config.get<string>('branchComparison', 'workingTree') === 'mergeBase') {
+      try {
+        picked = await resolveBranchTarget(this.git, repoRoot, picked.branch);
+      } catch {
+        // No common ancestor yet (e.g. an orphan branch): use the normal
+        // missing-default state, or retain the last good target when quiet.
+        picked = undefined;
+      }
+    }
     // A newer resolution, or a hand-picked target, landed during the awaits.
     if (seq !== this.defaultSeq) return;
     if (this.target && !this.target.isDefault) return;
@@ -377,10 +387,8 @@ export class ChangedFilesProvider implements vscode.WebviewViewProvider, vscode.
     const next: ActiveTarget | undefined =
       picked && repoRoot
         ? {
-            ref: picked.ref,
-            display: picked.display,
+            ...picked,
             repoRoot,
-            ...(picked.branch ? { branch: picked.branch } : {}),
             isDefault: true,
           }
         : undefined;
@@ -389,7 +397,8 @@ export class ChangedFilesProvider implements vscode.WebviewViewProvider, vscode.
       prev?.ref === next?.ref &&
       prev?.display === next?.display &&
       prev?.repoRoot === next?.repoRoot &&
-      prev?.branch === next?.branch
+      prev?.branch === next?.branch &&
+      prev?.head === next?.head
     ) {
       return;
     }
@@ -410,6 +419,21 @@ export class ChangedFilesProvider implements vscode.WebviewViewProvider, vscode.
 
   getFilter(): FilterState {
     return { ...this.filter };
+  }
+
+  async getFilteredFiles(options: FilterOptions = {}): Promise<FilterResult> {
+    const target = this.target;
+    return filterFiles(this.files, this.filter, {
+      ...options,
+      ...(target?.head ? {
+        readContent: async (file: ChangedFile) => {
+          const show = await this.git.showFileAtSha(target.repoRoot, target.head!, file.relPath);
+          return show.exists && show.kind === 'text' && show.bytes.length <= MAX_SEARCH_FILE_BYTES
+            ? show.bytes.toString('utf8')
+            : undefined;
+        },
+      } : {}),
+    });
   }
 
   getViewMode(): ViewMode {
@@ -464,6 +488,7 @@ export class ChangedFilesProvider implements vscode.WebviewViewProvider, vscode.
       display: picked.display,
       repoRoot,
       ...(picked.branch ? { branch: picked.branch } : {}),
+      ...(picked.head ? { head: picked.head } : {}),
     };
     this.target = persisted;
     await this.workspaceState.update(STATE_KEY, persisted);
@@ -492,7 +517,8 @@ export class ChangedFilesProvider implements vscode.WebviewViewProvider, vscode.
       this.post({ type: 'files', files: [], hasTarget: false, targetLabel: '' });
       return;
     }
-    const { ref, repoRoot, display } = this.target;
+    let target = this.target;
+    const { repoRoot, display } = target;
     // Only blank the list into a "Loading…" state when there is nothing to
     // show yet (first load / target change). Re-refreshes — especially the
     // automatic ones on save and git activity — keep the previous rows on
@@ -510,11 +536,20 @@ export class ChangedFilesProvider implements vscode.WebviewViewProvider, vscode.
       });
     }
     try {
+      const mode = vscode.workspace.getConfiguration('gitdiff', vscode.Uri.file(repoRoot))
+        .get<string>('branchComparison', 'workingTree');
+      if (!target.isDefault && target.branch && (target.head || mode === 'mergeBase')) {
+        target = { ...await resolveBranchTarget(this.git, repoRoot, target.branch), repoRoot };
+        if (token !== this.listSeq) return;
+      }
       const [tracked, untracked, worktrees] = await Promise.all([
-        this.git.listChangedPaths(repoRoot, ref),
-        this.git.listUntrackedPaths(repoRoot),
+        this.git.listChangedPaths(repoRoot, target.ref, target.head),
+        target.head ? Promise.resolve([]) : this.git.listUntrackedPaths(repoRoot),
         this.git.listWorktrees(repoRoot).catch(() => []),
       ]);
+      if (token !== this.listSeq) return;
+      this.target = target;
+      if (!target.isDefault) await this.workspaceState.update(STATE_KEY, target);
       if (token !== this.listSeq) return;
       const exclude = computeWorktreeExclusion(repoRoot, worktrees);
       const seen = new Set<string>();
@@ -620,7 +655,7 @@ export class ChangedFilesProvider implements vscode.WebviewViewProvider, vscode.
    */
   private async applyFilter(): Promise<void> {
     const token = ++this.filterSeq;
-    const result = await filterFiles(this.files, this.filter, {
+    const result = await this.getFilteredFiles({
       isCancelled: () => token !== this.filterSeq,
     });
     if (token !== this.filterSeq) return;
@@ -657,6 +692,7 @@ export class ChangedFilesProvider implements vscode.WebviewViewProvider, vscode.
         extra.repoLabel = path.basename(root) || root;
         extra.repoPath = root;
         if (this.target.isDefault) extra.targetIsDefault = true;
+        if (this.target.head) extra.readOnly = true;
       } else if (this.defaultMissing) {
         extra.defaultTargetMissing = this.defaultMissing;
       }
@@ -704,6 +740,7 @@ interface FilterResult {
 
 export interface FilterOptions {
   isCancelled?: () => boolean;
+  readContent?: (file: ChangedFile) => Promise<string | undefined>;
 }
 
 /** Max parallel `readFile` operations during a content search. */
@@ -752,6 +789,12 @@ export async function filterFiles(
       const f = pathOk[i];
       if (f.status === 'D') continue;
       try {
+        if (options.readContent) {
+          const content = await options.readContent(f);
+          if (isCancelled()) return;
+          if (content !== undefined && regex.test(content)) matched.push(f);
+          continue;
+        }
         const stat = await fs.promises.stat(f.absPath);
         if (!stat.isFile() || stat.size > MAX_SEARCH_FILE_BYTES) continue;
         if (isCancelled()) return;
@@ -1513,7 +1556,7 @@ body {
       dr.textContent = dirname(f.relPath);
       if (dr.textContent) li.appendChild(dr);
     }
-    li.appendChild(rb);
+    if (!payload.readOnly) li.appendChild(rb);
     return li;
   }
 

@@ -6,7 +6,9 @@ export interface ChangeEntry {
   absPath: string;
   /** Absent when the file does not exist at the target (added / untracked). */
   left?: GitdiffParts;
-  /** False when the file no longer exists in the working tree (deleted). */
+  /** Pinned committed contents for a branch review, rather than a live file. */
+  right?: GitdiffParts;
+  /** False when the file is deleted from the right-hand tree (working tree or HEAD). */
   hasRight: boolean;
 }
 
@@ -18,12 +20,16 @@ export function planAllChanges(
 ): ChangeEntry[] {
   return files.map((file) => {
     const entry: ChangeEntry = { absPath: file.absPath, hasRight: file.status !== 'D' };
+    if (target.head && entry.hasRight) {
+      entry.right = { ref: target.head, repoRoot, relPath: file.relPath };
+    }
     if (file.status !== 'A' && file.status !== '?') {
       entry.left = {
         ref: target.ref,
         repoRoot,
         relPath: file.origPath ?? file.relPath,
         ...(target.branch ? { branch: target.branch } : {}),
+        ...(target.head ? { head: target.head } : {}),
       };
     }
     return entry;
