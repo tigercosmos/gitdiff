@@ -35,33 +35,12 @@ export function activate(context: vscode.ExtensionContext): GitDiffExports {
     git,
     context.workspaceState,
     context.extensionUri,
-    // The default target applies to the repo the window is open on: the
-    // first workspace folder, not the active editor, which can sit in a
-    // nested worktree or submodule. Only a loose-file window (no folder)
-    // falls back to the active file.
-    async () => {
-      const folder = vscode.workspace.workspaceFolders?.[0];
-      const uri = folder?.uri.scheme === 'file' ? folder.uri : pickAnyWorkspaceFileUri();
-      if (!uri) return undefined;
-      try {
-        return await git.repoRoot(uri.fsPath);
-      } catch {
-        return undefined;
-      }
-    },
   );
   const syncHasTargetContext = (): void => {
     void vscode.commands.executeCommand(
       'setContext',
       'gitdiff.hasTarget',
       changedFiles.getCurrentTarget() !== undefined,
-    );
-    // Clearing the default target would only resolve it again, so the
-    // title bar hides Clear while the default is in use.
-    void vscode.commands.executeCommand(
-      'setContext',
-      'gitdiff.targetIsDefault',
-      changedFiles.isDefaultTarget(),
     );
   };
   syncHasTargetContext();
@@ -201,9 +180,9 @@ export function activate(context: vscode.ExtensionContext): GitDiffExports {
     // clauses in package.json read that setting directly, so no context key is
     // needed.
     vscode.commands.registerCommand('gitdiff.changedFiles.openAll', async () => {
-      // A hidden view skips auto-refresh, so its list (and a default target's
-      // SHA) may be old or never built. Bring both up to date before reading
-      // the target, so the list and the ref come from the same refresh.
+      // A hidden view skips auto-refresh, so its list may be old. Bring it up
+      // to date before reading the target, so the list and the ref come from
+      // the same refresh.
       if (!changedFiles.isViewVisible()) {
         await changedFiles.refresh({ quiet: true });
       }
@@ -290,11 +269,10 @@ export function activate(context: vscode.ExtensionContext): GitDiffExports {
           // Revert to the pinned `target.ref` deliberately — NOT a re-resolved
           // branch tip. The sidebar's file list and every diff it opens are
           // computed against this exact SHA (ChangedFilesProvider holds it for
-          // a picked target's lifetime; a default target's SHA changes only
-          // in a refresh, together with the list), so reverting to it keeps
-          // the result consistent with the diff the user is looking at.
-          // Re-resolving a branch that advanced since selection would restore
-          // content that doesn't match the displayed comparison.
+          // the target's lifetime), so reverting to it keeps the result
+          // consistent with the diff the user is looking at. Re-resolving a
+          // branch that advanced since selection would restore content that
+          // doesn't match the displayed comparison.
           //
           // For a rename, pass the old path so the revert also restores the
           // original name. Only for `R` — a copy's source is an unrelated file
@@ -313,9 +291,6 @@ export function activate(context: vscode.ExtensionContext): GitDiffExports {
       },
     ),
     vscode.commands.registerCommand('gitdiff.changedFiles.clearTarget', async () => {
-      // Clearing the default would only resolve it again; do not close the
-      // user's diff tabs for a no-op.
-      if (changedFiles.isDefaultTarget()) return;
       const tabs: vscode.Tab[] = [];
       for (const { tab } of openGitdiffTabs()) tabs.push(tab);
       tabs.push(...openGitdiffMultiDiffTabs());

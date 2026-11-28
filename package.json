@@ -16,7 +16,7 @@
     "changed files",
     "merge"
   ],
-  "version": "0.12.0",
+  "version": "0.12.1",
   "publisher": "tigercosmos",
   "icon": "icons/activity.png",
   "engines": {
@@ -147,12 +147,12 @@
           "when": "gitdiff.hasTarget && config.gitdiff.openAllChanges.enabled"
         },
         {
-          "command": "gitdiff.changedFiles.revertFile",
-          "when": "false"
+          "command": "gitdiff.changedFiles.clearTarget",
+          "when": "gitdiff.hasTarget"
         },
         {
-          "command": "gitdiff.changedFiles.clearTarget",
-          "when": "gitdiff.hasTarget && !gitdiff.targetIsDefault"
+          "command": "gitdiff.changedFiles.revertFile",
+          "when": "false"
         }
       ],
       "explorer/context": [
@@ -214,12 +214,12 @@
         },
         {
           "command": "gitdiff.changedFiles.refresh",
-          "when": "view == gitdiff.changedFiles",
+          "when": "view == gitdiff.changedFiles && gitdiff.hasTarget",
           "group": "navigation@2"
         },
         {
           "command": "gitdiff.changedFiles.clearTarget",
-          "when": "view == gitdiff.changedFiles && gitdiff.hasTarget && !gitdiff.targetIsDefault",
+          "when": "view == gitdiff.changedFiles && gitdiff.hasTarget",
           "group": "navigation@3"
         },
         {
@@ -248,7 +248,8 @@
         "gitdiff.defaultTarget": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Branch or ref the Changed Files view compares against until you pick a target. Leave empty to use the remote's default branch (the one `origin/HEAD` points at, usually `origin/main` or `origin/master`); without `origin/HEAD`, `origin/main`, then `origin/master`. Clearing a picked target returns the view to this default."
+          "order": 0,
+          "markdownDescription": "Default branch to compare against. It is shown first in the target chooser (**Set Comparison Target…** and **Change Target…**), so it is one click away. Leave empty to use the remote's default branch: the one `origin/HEAD` points at (usually `origin/main` or `origin/master`), else `origin/main`, else `origin/master`. Any branch, tag, or commit works, e.g. `upstream/develop`. Nothing is compared until you pick a target."
         },
         "gitdiff.openAllChanges.enabled": {
           "type": "boolean",

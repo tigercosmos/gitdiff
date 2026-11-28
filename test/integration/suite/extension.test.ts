@@ -1211,6 +1211,50 @@ describe('gitdiff e2e', function () {
       assert.ok(stored.startsWith(shaThird), `expected target ${shaThird}, got ${stored}`);
     });
 
+    it('offers the default branch as the first row, and picking it sets the target', async () => {
+      const root = makeRepo();
+      const filePath = path.join(root, 'a.txt');
+      fs.writeFileSync(filePath, 'v1\n');
+      const shaMain = commit(root, 'c1');
+      fs.writeFileSync(filePath, 'v2\n');
+      const shaMaster = commit(root, 'c2');
+      fs.writeFileSync(filePath, 'working tree\n');
+      // Remote-tracking branches without a network remote; origin/HEAD names
+      // origin/master, so it must win over origin/main.
+      git(root, ['update-ref', 'refs/remotes/origin/main', shaMain]);
+      git(root, ['update-ref', 'refs/remotes/origin/master', shaMaster]);
+      git(root, ['symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/master']);
+
+      await vscode.window.showTextDocument(vscode.Uri.file(filePath));
+
+      // The stub picks with `items.find`, which passes each row's index.
+      let row: any;
+      let rowIndex = -1;
+      await withQuickPickQueue(
+        [
+          (i: any, index?: number) => {
+            if (i.defaultTarget === undefined) return false;
+            row = i;
+            rowIndex = index ?? -1;
+            return true;
+          },
+        ],
+        () => vscode.commands.executeCommand('gitdiff.changedFiles.setTarget'),
+      );
+      await settle();
+
+      assert.ok(row, 'the chooser offers a default-target row');
+      assert.strictEqual(row.label, '$(star-full) origin/master');
+      assert.strictEqual(rowIndex, 0, 'the default row comes first');
+      const api = vscode.extensions.getExtension('tigercosmos.gitdiff')!.exports;
+      const target = api.changedFiles.getCurrentTarget();
+      assert.strictEqual(target.display, 'origin/master');
+      assert.strictEqual(target.branch, 'origin/master');
+      // `commit()` returns a short SHA; the target holds the full one.
+      assert.match(target.ref, /^[0-9a-f]{40}$/);
+      assert.ok(target.ref.startsWith(shaMaster), `expected ${shaMaster}, got ${target.ref}`);
+    });
+
     it('persists the chosen target across calls (workspaceState round-trip)', async () => {
       // Verify persistence indirectly: setTarget then openFile uses the
       // persisted target without re-prompting.

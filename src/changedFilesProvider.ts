@@ -5,7 +5,6 @@ import * as vscode from 'vscode';
 import { GitService } from './gitService';
 import { compilePatterns } from './util/glob';
 import { compileSearch } from './util/search';
-import { defaultTargetCandidates, resolveDefaultTarget } from './defaultTarget';
 import type { PickedRef } from './refPicker';
 
 export type ChangeStatus = 'M' | 'A' | 'D' | 'R' | 'C' | 'T' | 'U' | '?';
@@ -58,15 +57,6 @@ interface PersistedTarget {
   repoRoot: string;
 }
 
-/**
- * The target the view compares against. `isDefault` marks one resolved from
- * `gitdiff.defaultTarget` rather than picked by hand: it is never persisted,
- * and it is re-resolved on every refresh.
- */
-interface ActiveTarget extends PersistedTarget {
-  isDefault?: boolean;
-}
-
 interface FilesMessage {
   type: 'files';
   files: Array<{ relPath: string; status: ChangeStatus }>;
@@ -85,13 +75,6 @@ interface FilesMessage {
   repoLabel?: string;
   /** Absolute repo root — the repo label's tooltip. */
   repoPath?: string;
-  /** True when the target came from `gitdiff.defaultTarget`, not a pick. */
-  targetIsDefault?: boolean;
-  /**
-   * With no target: the name typed in `gitdiff.defaultTarget` that did not
-   * resolve, so the empty state can say why it is empty.
-   */
-  defaultTargetMissing?: string;
 }
 
 interface InitMessage {
@@ -140,11 +123,7 @@ export class ChangedFilesProvider implements vscode.WebviewViewProvider, vscode.
   private readonly _onDidChangeViewMode = new vscode.EventEmitter<ViewMode>();
   readonly onDidChangeViewMode = this._onDidChangeViewMode.event;
 
-  private target: ActiveTarget | undefined;
-  /** Guards syncDefaultTarget against an older resolution landing last. */
-  private defaultSeq = 0;
-  /** The typed `gitdiff.defaultTarget` name that last failed to resolve. */
-  private defaultMissing: string | undefined;
+  private target: PersistedTarget | undefined;
   private filter: FilterState;
   private viewMode: ViewMode;
   private view: vscode.WebviewView | undefined;
@@ -180,11 +159,6 @@ export class ChangedFilesProvider implements vscode.WebviewViewProvider, vscode.
     private readonly git: GitService,
     private readonly workspaceState: vscode.Memento,
     private readonly extensionUri: vscode.Uri,
-    /**
-     * Finds the repo the default target applies to (the repo the window is
-     * open on). Omitted, the view has no default target.
-     */
-    private readonly findDefaultRepoRoot?: () => Promise<string | undefined>,
   ) {
     this.target = workspaceState.get<PersistedTarget>(STATE_KEY);
     // workspaceState is on-disk JSON that could carry stale or hand-edited
@@ -193,20 +167,13 @@ export class ChangedFilesProvider implements vscode.WebviewViewProvider, vscode.
     this.filter = sanitizeFilter({ ...DEFAULT_FILTER, ...(persistedFilter ?? {}) });
     this.viewMode = sanitizeViewMode(workspaceState.get<unknown>(VIEW_MODE_KEY));
     // Keep the list live: a save inside the target repo means the working
-    // tree changed, so the diff-vs-target list is stale. With no target, any
-    // save is a cue to look for the default again (e.g. a remote was added).
+    // tree changed, so the diff-vs-target list is stale.
     this.saveSub = vscode.workspace.onDidSaveTextDocument((doc) => {
-      if (doc.uri.scheme !== 'file') return;
-      if (this.isUnderTargetRepo(doc.uri.fsPath) || this.awaitingDefault()) {
+      if (doc.uri.scheme === 'file' && this.isUnderTargetRepo(doc.uri.fsPath)) {
         this.scheduleAutoRefresh(false);
       }
     });
     void this.installGitWatcher();
-    // No target picked yet: resolve the default now, so the title-bar
-    // buttons work before the view is first shown. Only the target: the file
-    // listing waits for the view (or Open All Changes), so a window that
-    // never opens the sidebar does not pay for a full scan.
-    if (!this.target && this.findDefaultRepoRoot) void this.syncDefaultTarget(true);
   }
 
   dispose(): void {
@@ -279,8 +246,7 @@ export class ChangedFilesProvider implements vscode.WebviewViewProvider, vscode.
     if (this.autoRefreshTimer) clearTimeout(this.autoRefreshTimer);
     this.autoRefreshTimer = setTimeout(() => {
       this.autoRefreshTimer = undefined;
-      if (!this.view?.visible) return;
-      if (!this.target && !this.awaitingDefault()) return;
+      if (!this.target || !this.view?.visible) return;
       void this.refresh({ quiet: true });
     }, 400);
   }
@@ -329,74 +295,6 @@ export class ChangedFilesProvider implements vscode.WebviewViewProvider, vscode.
 
   getCurrentRepoRoot(): string | undefined {
     return this.target?.repoRoot;
-  }
-
-  /** True when the current target came from `gitdiff.defaultTarget`. */
-  isDefaultTarget(): boolean {
-    return !!this.target?.isDefault;
-  }
-
-  /** No target yet, but a default target may still resolve later. */
-  private awaitingDefault(): boolean {
-    return !this.target && !!this.findDefaultRepoRoot;
-  }
-
-  /**
-   * When no target was picked by hand, point the view at the default target
-   * (`gitdiff.defaultTarget`, else origin/main, else origin/master). Runs on
-   * every refresh, so the list follows the default branch as fetches move it
-   * and a changed setting takes effect. Never replaces a hand-picked target.
-   * The repo stays the one the default was first resolved in. A quiet
-   * (automatic) refresh that resolves nothing keeps the last default, so a
-   * transient git failure does not empty the list.
-   */
-  private async syncDefaultTarget(quiet: boolean): Promise<void> {
-    if (!this.findDefaultRepoRoot) return;
-    if (this.target && !this.target.isDefault) return;
-    const seq = ++this.defaultSeq;
-    let repoRoot = this.target?.repoRoot;
-    if (!repoRoot) {
-      repoRoot = await this.findDefaultRepoRoot().catch(() => undefined);
-    }
-    const setting = vscode.workspace.getConfiguration('gitdiff').get<string>('defaultTarget');
-    // origin/HEAD only matters when no branch was typed in the setting.
-    const originHead =
-      repoRoot && !setting?.trim()
-        ? await this.git.remoteHead(repoRoot).catch(() => undefined)
-        : undefined;
-    const candidates = defaultTargetCandidates(setting, originHead);
-    const picked = repoRoot
-      ? await resolveDefaultTarget(this.git, repoRoot, candidates)
-      : undefined;
-    // A newer resolution, or a hand-picked target, landed during the awaits.
-    if (seq !== this.defaultSeq) return;
-    if (this.target && !this.target.isDefault) return;
-    const typed = setting?.trim();
-    this.defaultMissing = !picked && repoRoot && typed ? typed : undefined;
-    if (!picked && quiet && this.target) return;
-    const next: ActiveTarget | undefined =
-      picked && repoRoot
-        ? {
-            ref: picked.ref,
-            display: picked.display,
-            repoRoot,
-            ...(picked.branch ? { branch: picked.branch } : {}),
-            isDefault: true,
-          }
-        : undefined;
-    const prev = this.target;
-    if (
-      prev?.ref === next?.ref &&
-      prev?.display === next?.display &&
-      prev?.repoRoot === next?.repoRoot &&
-      prev?.branch === next?.branch
-    ) {
-      return;
-    }
-    this.target = next;
-    this.files = [];
-    this._onDidChangeTarget.fire();
-    if (prev?.repoRoot !== next?.repoRoot) void this.installGitWatcher();
   }
 
   /** True while the Changed Files view is on screen (its list is kept live). */
@@ -459,14 +357,13 @@ export class ChangedFilesProvider implements vscode.WebviewViewProvider, vscode.
   async setTarget(picked: PickedRef, repoRoot: string): Promise<void> {
     this.invalidate();
     this.files = [];
-    const persisted: PersistedTarget = {
+    this.target = {
       ref: picked.ref,
       display: picked.display,
       repoRoot,
       ...(picked.branch ? { branch: picked.branch } : {}),
     };
-    this.target = persisted;
-    await this.workspaceState.update(STATE_KEY, persisted);
+    await this.workspaceState.update(STATE_KEY, this.target);
     this._onDidChangeTarget.fire();
     void this.installGitWatcher();
     await this.refresh();
@@ -479,14 +376,16 @@ export class ChangedFilesProvider implements vscode.WebviewViewProvider, vscode.
     this._onDidChangeTarget.fire();
     void this.installGitWatcher();
     this.files = [];
-    // Falls back to the default target, or posts the empty state.
-    await this.refresh();
+    this.post({
+      type: 'files',
+      files: [],
+      hasTarget: false,
+      targetLabel: '',
+    });
   }
 
   async refresh(options: { quiet?: boolean } = {}): Promise<void> {
     const token = this.invalidate();
-    await this.syncDefaultTarget(!!options.quiet);
-    if (token !== this.listSeq) return;
     if (!this.target) {
       this.files = [];
       this.post({ type: 'files', files: [], hasTarget: false, targetLabel: '' });
@@ -543,10 +442,8 @@ export class ChangedFilesProvider implements vscode.WebviewViewProvider, vscode.
         // keep the last good list on screen and let the next event retry.
         return;
       }
-      // Quiet with no list held: the default target moved (syncDefaultTarget
-      // dropped the old list), so the rows on screen belong to the old
-      // commit. Post the empty list rather than leave rows that no longer
-      // match `this.files` — but without a toast, as for any auto-refresh.
+      // With no list to keep, still post: a superseded non-quiet refresh may
+      // have shown "Loading…", and nothing else would clear it.
       if (!options.quiet) {
         void vscode.window.showErrorMessage(
           `GitDiff: failed to list changes: ${err instanceof Error ? err.message : String(err)}`,
@@ -568,8 +465,11 @@ export class ChangedFilesProvider implements vscode.WebviewViewProvider, vscode.
     switch (m.type) {
       case 'ready':
         this.post({ type: 'init', filter: this.filter, viewMode: this.viewMode });
-        // Also posts the empty state when there is no target.
-        await this.refresh();
+        if (this.target) {
+          await this.refresh();
+        } else {
+          this.post({ type: 'files', files: [], hasTarget: false, targetLabel: '' });
+        }
         break;
       case 'setFilter': {
         if (!m.filter) break;
@@ -656,9 +556,6 @@ export class ChangedFilesProvider implements vscode.WebviewViewProvider, vscode.
         // never blank.
         extra.repoLabel = path.basename(root) || root;
         extra.repoPath = root;
-        if (this.target.isDefault) extra.targetIsDefault = true;
-      } else if (this.defaultMissing) {
-        extra.defaultTargetMissing = this.defaultMissing;
       }
       out = { ...msg, ...extra };
     }
@@ -1028,11 +925,6 @@ body {
   padding: 8px 2px;
   opacity: 0.85;
 }
-.default-missing {
-  margin-top: 4px;
-  color: var(--vscode-errorForeground);
-  font-size: 11px;
-}
 #open-settings {
   margin-left: 4px;
   background: var(--vscode-button-secondaryBackground);
@@ -1066,9 +958,8 @@ body {
 <div id="search-error" class="search-error" style="display:none"></div>
 <div id="no-target" class="no-target" style="display:none">
   <div>No comparison target selected.</div>
-  <div id="default-missing" class="default-missing" style="display:none"></div>
   <button class="set-target-btn" id="set-target" type="button">Set target…</button>
-  <button class="set-target-btn" id="open-settings" type="button" title="Set a default target (gitdiff.defaultTarget)">Settings…</button>
+  <button class="set-target-btn" id="open-settings" type="button" title="Choose the default branch shown first in the target chooser (gitdiff.defaultTarget)">Settings…</button>
 </div>
 <div id="loading" class="loading" style="display:none">Loading…</div>
 <ul id="files-list"></ul>
@@ -1351,7 +1242,7 @@ body {
     // filesystem strings and must never be parsed as markup.
     const bar = $('target-bar');
     bar.textContent = hasTarget && payload.targetLabel
-      ? 'Comparing vs ' + payload.targetLabel + (payload.targetIsDefault ? ' (default)' : '')
+      ? 'Comparing vs ' + payload.targetLabel
       : '';
     if (hasTarget && payload.targetLabel && payload.repoLabel) {
       const repo = document.createElement('span');
@@ -1362,11 +1253,6 @@ body {
     }
     bar.style.display = hasTarget && payload.targetLabel ? '' : 'none';
     $('no-target').style.display = hasTarget ? 'none' : '';
-    const missing = !hasTarget && payload.defaultTargetMissing;
-    $('default-missing').textContent = missing
-      ? "Default target '" + payload.defaultTargetMissing + "' not found."
-      : '';
-    $('default-missing').style.display = missing ? '' : 'none';
     $('loading').style.display = loading ? '' : 'none';
     $('search-error').style.display = payload.searchError ? '' : 'none';
     $('search-error').textContent = payload.searchError

@@ -11,7 +11,7 @@ Module._resolveFilename = function (request: string, ...rest: unknown[]) {
 };
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { buildTargetChoiceItems } = require('../../src/refPicker');
+const { buildTargetChoiceItems, choiceRowKey } = require('../../src/refPicker');
 
 describe('buildTargetChoiceItems', () => {
   it('offers only Branch…/Commit… when nothing is typed', () => {
@@ -133,5 +133,73 @@ describe('buildTargetChoiceItems', () => {
       assert.strictEqual(buildTargetChoiceItems('', []).length, 2);
       assert.strictEqual(buildTargetChoiceItems('').length, 2);
     });
+  });
+
+  describe('default-target row', () => {
+    const found = {
+      kind: 'found',
+      picked: { ref: 'f'.repeat(40), display: 'origin/main', branch: 'origin/main' },
+    };
+
+    it('is the first row when nothing is typed, so Enter picks it', () => {
+      const items = buildTargetChoiceItems('', [], found);
+      assert.strictEqual(items[0].label, '$(star-full) origin/main');
+      assert.strictEqual(items[0].description, 'default target');
+      assert.deepStrictEqual(items[0].defaultTarget, found.picked);
+      assert.deepStrictEqual(
+        items.slice(1).map((i: any) => i.choice),
+        ['branch', 'commit'],
+      );
+    });
+
+    it('comes right after the typed row', () => {
+      const items = buildTargetChoiceItems('origin/ma', [], found);
+      assert.strictEqual(items[0].typed, 'origin/ma');
+      assert.deepStrictEqual(items[1].defaultTarget, found.picked);
+    });
+
+    // Not alwaysShow: typing something unrelated filters it out like any row.
+    it('is filtered by what you type', () => {
+      const items = buildTargetChoiceItems('', [], found);
+      assert.ok(!items[0].alwaysShow);
+    });
+
+    it('says when the name in the setting does not resolve, and offers Settings', () => {
+      const items = buildTargetChoiceItems('', [], { kind: 'missing', name: 'orgin/main' });
+      assert.strictEqual(items[0].label, "$(warning) Default target 'orgin/main' not found");
+      assert.strictEqual(items[0].openSettings, true);
+      assert.strictEqual(items[0].defaultTarget, undefined);
+    });
+
+    it('is absent when there is no default', () => {
+      const items = buildTargetChoiceItems('', []);
+      assert.ok(items.every((i: any) => !i.defaultTarget && !i.openSettings));
+    });
+  });
+});
+
+// The chooser re-renders as rows load; this key keeps the highlight on the
+// same row across those re-renders, which build new item objects.
+describe('choiceRowKey', () => {
+  const found = {
+    kind: 'found',
+    picked: { ref: 'f'.repeat(40), display: 'origin/main', branch: 'origin/main' },
+  };
+  const commits = [
+    { fullSha: 'a'.repeat(40), shortSha: 'aaaaaaa', subject: 's', isoDate: new Date().toISOString(), author: 'A' },
+  ];
+
+  it('matches the same row before and after late rows load', () => {
+    const before = buildTargetChoiceItems('', []);
+    const after = buildTargetChoiceItems('', commits, found);
+    const commitRow = before.find((i: any) => i.choice === 'commit');
+    const same = after.find((i: any) => choiceRowKey(i) === choiceRowKey(commitRow));
+    assert.strictEqual(same.choice, 'commit');
+  });
+
+  it('gives every selectable row a distinct key, and separators none', () => {
+    const items = buildTargetChoiceItems('v1', commits, found);
+    const keys = items.map((i: any) => choiceRowKey(i));
+    assert.deepStrictEqual(keys, ['typed:v1', 'default', 'choice:branch', 'choice:commit', undefined, `ref:${'a'.repeat(40)}`]);
   });
 });
